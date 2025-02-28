@@ -7,15 +7,11 @@
 
 Typical examples:
 
-./pawningest.py run -s http://127.0.0.1:7861 -m /path/to/webui/models -o ~/some-dir
-(run tests and output to "~/some-dir")
+./pawningest.py -u "https://ndownloader.figstatic.com/files/6971717"
+(read the URL and ingest these games --- expects a zipped file)
 
-./pawningest.py print -m /path/to/webui/models -o ~/some-dir
-(print all your test configs and status of cache)
-
-
-small PGN: https://www.pgnmentor.com/players/Abdusattorov.zip
-
+./pawningest.py -u "https://ndownloader.figstatic.com/files/6971717" -r 1
+(print all the games in the URL but don't add them to the DB)
 """
 
 import argparse
@@ -68,7 +64,7 @@ _SOURCES: dict[str, tuple[str, str, list[str]]] = {  # name: (domain, human_url,
         ]
     ),
 }
-_VALID_SOURCES: str = ','.join(str(i) for i in _SOURCES.keys())
+_VALID_SOURCES: str = ','.join(str(i) for i in _SOURCES)
 
 
 def Main() -> None:
@@ -95,7 +91,7 @@ def Main() -> None:
       help='If "True" will not use cache, will re-download files (default: False)')
   args: argparse.Namespace = parser.parse_args()
   url: str = args.url.strip()
-  sources: str = args.sources.strip()
+  sources: list[str] = [s.strip() for s in args.sources]
   if not sources and not url:
     raise ValueError('we must have either -s/--sources or -u/--url to load from')
   maxload: int = args.maxload if args.maxload >= 0 else 0

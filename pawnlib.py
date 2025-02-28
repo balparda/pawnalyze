@@ -29,7 +29,7 @@ _PGN_CACHE_FILE: str = os.path.join(_PGN_CACHE_DIR, 'cache.bin')
 
 # PGN data directory
 _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
-_PGN_DATA_FILE: str = os.path.join(_PGN_CACHE_DIR, 'pawnalyze-games-db.bin')
+_PGN_DATA_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games-db.bin')
 
 # useful
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
@@ -155,42 +155,6 @@ def _GameMinimalHeaders(game: chess.pgn.Game) -> dict[str, str]:
   return headers
 
 
-# helper ICCF mappings
-_ICCF_MAP: dict[str, str] = {
-    'a': '1', 'b': '2', 'c': '3', 'd': '4', 'e': '5', 'f': '6', 'g': '7', 'h': '8'}
-_INVERSE_ICCF_MAP: dict[str, str] = {
-    '1': 'a', '2': 'b', '3': 'c', '4': 'd', '5': 'e', '6': 'f', '7': 'g', '8': 'h'}
-
-
-def SmithToICCF(move: str) -> int:
-  """Convert move in 'Smith' notation (e.g. 'e2e4') to ICCF numeric notation (e.g. 5254)."""
-  # see: https://en.wikipedia.org/wiki/ICCF_numeric_notation
-  # extract origin (e.g. 'e2') and destination (e.g. 'e4') squares
-  move = move.strip().lower()
-  origin: str = move[:2]
-  destination: str = move[2:]
-  # convert to ICCF numeric notation
-  origin_iccf: str = _ICCF_MAP[origin[0]] + origin[1]
-  destination_iccf: str = _ICCF_MAP[destination[0]] + destination[1]
-  # concatenate and convert
-  return int(origin_iccf + destination_iccf)
-
-
-def ICCFToSmith(iccf: int) -> str:
-  """Convert move in ICCF numeric notation (e.g. 5254) to 'Smith' notation (e.g. 'e2e4')."""
-  # see: https://en.wikipedia.org/wiki/Chess_notation
-  # convert the integer to a 4-digit string
-  iccf_str = str(iccf)
-  if len(iccf_str) != 4:
-    raise ValueError(f'Invalid ICCF notation: must be exactly 4 digits: {iccf_str}')
-  # parse out origin (first 2 digits) and destination (last 2 digits)
-  # convert each file digit back to a-h, and keep the rank as is
-  origin_file: str = _INVERSE_ICCF_MAP[iccf_str[0]]
-  destination_file: str = _INVERSE_ICCF_MAP[iccf_str[2]]
-  # combine for standard chess 'Smith' notation
-  return f'{origin_file}{iccf_str[1]}{destination_file}{iccf_str[3]}'
-
-
 # convert a chess.Move into an integer we can use to index our dictionaries
 EncodePly: Callable[[chess.Move], int] = lambda m: (
     m.from_square * 100 + m.to_square + (m.promotion * 1000000 if m.promotion else 0))
@@ -222,7 +186,7 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
       PositionFlag.GAME_CONTINUED_AFTER_MANDATORY_DRAW in old_flags):
     flags |= PositionFlag.GAME_CONTINUED_AFTER_MANDATORY_DRAW
   # add the "is_*()" method calls
-  for method, flag in [
+  position_checks: list[tuple[Callable[[], bool], PositionFlag]] = [
       (board.is_check, PositionFlag.CHECK),
       (board.is_checkmate, PositionFlag.CHECKMATE),
       (board.is_stalemate, PositionFlag.STALEMATE),
@@ -230,7 +194,9 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
       (board.is_repetition, PositionFlag.REPETITIONS_3),
       (board.is_fivefold_repetition, PositionFlag.REPETITIONS_5),
       (board.is_fifty_moves, PositionFlag.MOVES_50),
-      (board.is_seventyfive_moves, PositionFlag.MOVES_75)]:
+      (board.is_seventyfive_moves, PositionFlag.MOVES_75),
+  ]
+  for method, flag in position_checks:
     if method():
       flags |= flag
   # add mandatory winning conditions
@@ -279,7 +245,7 @@ class PGNData:
         # game goes into errors list
         raise InvalidGameError(GAME_ERRORS(game))
       # game should be OK, so add to dict structure by going over the moves
-      dict_pointer: dict[str, GamePosition] = self.db.positions
+      dict_pointer: dict[int, GamePosition] = self.db.positions
       position: Optional[GamePosition] = None
       new_flags = PositionFlag(0)
       game_headers: dict[str, str] = _GameMinimalHeaders(game)
@@ -295,11 +261,13 @@ class PGNData:
         # push the move to the board
         encoded_ply: int = EncodePly(move)
         san: str = board.san(move)
+        if not board.is_legal(move):
+          raise InvalidGameError(f'Invalid move at {san} with {board.fen()!r}')
         board.push(move)
         # add to dictionary, if needed
         if encoded_ply not in dict_pointer:
           # new entry, check if position is valid
-          if (board_status := board.status()):
+          if (board_status := board.status()) or not board.is_valid():
             raise InvalidGameError(f'Invalid position ({board_status!r}) at {san} with {board.fen()!r}')
           # add the position
           new_count += 1
