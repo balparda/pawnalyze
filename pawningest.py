@@ -19,6 +19,7 @@ import io
 import logging
 # import pdb
 import tempfile
+import time
 from typing import Generator, Optional
 import urllib.request
 import zipfile
@@ -181,6 +182,8 @@ def _LoadFromURL(
   """Load a source from URL."""
   pgn_path: Optional[str] = cache.GetCachedPath(url) if cache else None
   game_count: int = 0
+  ply_count: int = 0
+  node_count: int = 0
   with tempfile.NamedTemporaryFile() as out_file:
     if pgn_path is None:
       # we don't have the PGN yet: open the URL, download file
@@ -200,15 +203,24 @@ def _LoadFromURL(
       if cache:
         cache.AddCachedFile(url, out_file)  # type:ignore
     # we have the PGN as a file in "pgn_path" for sure here
+    processing_start: float = time.time()
     for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(pgn_path)):
       if maxload > 0 and game_count >= maxload:
         logging.info('Stopping loading games because reached limit of %d games', maxload)
         break
       if db:
         # we are building the DB
-        db.LoadGame(pgn, game)
-        if not game_count % 10000 and game_count:
-          logging.info('Loaded %d games', game_count)
+        plys: int
+        nodes: int
+        plys, nodes = db.LoadGame(pgn, game)
+        ply_count += plys
+        node_count += nodes
+        if not game_count % 1000 and game_count:
+          delta: float = time.time() - processing_start
+          logging.info(
+              'Loaded %d games (%d plys, %d nodes) in %s (%s games/s average)',
+              game_count, ply_count, node_count,
+              base.HumanizedSeconds(delta), game_count / delta)
       else:
         # we are printing the games
         if maxprint > 0 and game_count >= maxprint:
