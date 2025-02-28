@@ -159,8 +159,11 @@ As our analysis grows, we must ensure the system can scale and handle the data v
 ### Dependencies
 
 ```sh
-pip install python-chess pandas numpy
+pip install python-chess # pandas numpy
+$ python3 -m pip install python-chess
 ```
+
+https://python-chess.readthedocs.io/en/latest/
 
 ### Running the Parser
 
