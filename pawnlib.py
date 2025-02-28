@@ -234,6 +234,11 @@ class PGNData:
     else:
       logging.info('No data file to load yet')
 
+  def Save(self) -> None:
+    """Save DB file."""
+    base.BinSerialize(self.db, _PGN_DATA_FILE)
+    logging.info('Saved data file %r', _PGN_DATA_FILE)
+
   def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[int, int]:
     """Loads game into database. Returns (plys, new_positions)."""
     new_count: int = 0
@@ -306,8 +311,3 @@ class PGNData:
       self.db.error_games.append(error_game)
       logging.warning(str(error_game))
       return (n_ply + 1, new_count)
-
-  def Save(self) -> None:
-    """Save DB file."""
-    base.BinSerialize(self.db, _PGN_DATA_FILE)
-    logging.info('Saved data file %r', _PGN_DATA_FILE)

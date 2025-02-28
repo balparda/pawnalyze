@@ -207,8 +207,8 @@ def _LoadFromURL(
       if db:
         # we are building the DB
         db.LoadGame(pgn, game)
-        if not game_count % 10000:
-          print(game_count)
+        if not game_count % 10000 and game_count:
+          logging.info('Loaded %d games', game_count)
       else:
         # we are printing the games
         if maxprint > 0 and game_count >= maxprint:
@@ -220,7 +220,7 @@ def _LoadFromURL(
         print(pgn)
         if game.errors:
           print()
-          print(f'==>> ERROR: {pawnlib.GAME_ERRORS(game)!r}')
+          print(f'  ==>> ERROR: {pawnlib.GAME_ERRORS(game)!r}')
         print()
   return game_count
 
