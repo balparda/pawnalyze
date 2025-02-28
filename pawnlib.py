@@ -296,7 +296,7 @@ class PGNData:
       # we have a valid game, so we must add the game here
       if position.games is None:
         position.games = []
-      position.games.append(game_headers)
+      position.games.append(game_headers)  # TODO: we have to treat repeated games imported
       return (n_ply + 1, new_count)
     except EmptyGameError:
       self.db.empty_games.append(ErrorGame(pgn=original_pgn, error='Game has no moves'))
