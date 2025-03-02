@@ -12,7 +12,7 @@ import logging
 import os
 import os.path
 # import pdb
-from typing import Any, BinaryIO, Callable, Optional
+from typing import Any, BinaryIO, Callable, Generator, Optional
 
 import chess
 import chess.pgn
@@ -127,12 +127,23 @@ class PositionFlag(enum.Flag):
   # <<== add new stuff to the end!
 
 
+RESULTS_FLAG_MAP: dict[PositionFlag, str] = {
+    PositionFlag.WHITE_WIN: '1-0',
+    PositionFlag.BLACK_WIN: '0-1',
+    PositionFlag.DRAWN_GAME: '1/2-1/2',
+}
+RESULTS_PGN_MAP: dict[str, PositionFlag] = {v: k for k, v in RESULTS_FLAG_MAP.items()}
+
+
 @dataclasses.dataclass
 class GamePosition:
   """Game position."""
   plys: dict[int, Any]                   # the next found continuations {ply: GamePosition}
   flags: PositionFlag                    # the status of this position
   games: Optional[list[dict[str, str]]]  # list of PGN headers that end in this position
+
+
+_EMPTY_POSITION: GamePosition = GamePosition(plys={}, flags=PositionFlag(0), games=None)
 
 
 @dataclasses.dataclass
@@ -175,6 +186,43 @@ def DecodePly(ply: int) -> chess.Move:
   return chess.Move(from_square, ply, promotion=promotion)
 
 
+def IterateGame(game: chess.pgn.Game) -> Generator[
+    tuple[int, str, int, chess.Board, PositionFlag], None, None]:
+  """Iterates a game, returning useful information of moves and board.
+
+  Args:
+    game: The game
+
+  Yields:
+    (ply_counter, san_move, encoded_ply_move, board_obj, position_flags)
+
+  Raises:
+    NonStandardGameError: if non-traditional chess is detected
+    InvalidGameError: if game object indicates errors or if illegal move/position is detected
+  """
+  board: chess.Board = game.board()
+  flags: PositionFlag = PositionFlag(0)
+  # does this game contain errors?
+  if game.errors:
+    # game goes into errors list
+    raise InvalidGameError(GAME_ERRORS(game))
+  # test for non-standard chess games
+  if board.chess960 or board.fen() != STANDARD_CHESS_FEN:
+    raise NonStandardGameError()
+  # go over the moves
+  for n_ply, move in enumerate(game.mainline_moves()):
+    # push the move to the board
+    san: str = board.san(move)
+    if not board.is_legal(move):
+      raise InvalidGameError(f'Invalid move at {san} with {board.fen()!r}')
+    board.push(move)
+    # check if position is valid
+    if (board_status := board.status()) or not board.is_valid():
+      raise InvalidGameError(f'Invalid position ({board_status!r}) at {san} with {board.fen()!r}')
+    # yield useful move/position info
+    yield (n_ply + 1, san, EncodePly(move), board, _CreatePositionFlags(board, san, flags))
+
+
 def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) -> PositionFlag:
   """Creates position flags for a given position and also if game should mandatorily end."""
   # create as the move
@@ -206,14 +254,39 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
     flags |= PositionFlag.BLACK_WIN
   # add mandatory draw positions
   if (PositionFlag.STALEMATE in flags or
-      PositionFlag.INSUFFICIENT_MATERIAL in flags or
+      PositionFlag.INSUFFICIENT_MATERIAL in flags or  # TODO: check insufficient material white/black
       PositionFlag.REPETITIONS_5 in flags or
       PositionFlag.MOVES_75 in flags):
     flags |= PositionFlag.DRAWN_GAME
     # check that it is not also a win position!
     if PositionFlag.BLACK_WIN in flags or PositionFlag.WHITE_WIN in flags:
-      raise InvalidGameError(f'Position is both a WIN and a DRAW, ({flags!r}) at {san} with {board.fen()!r}')
+      raise InvalidGameError(
+          f'Position is both a WIN and a DRAW, ({flags!r}) at {san} with {board.fen()!r}')
   return flags
+
+
+def _FixGameResultHeaderOrRaise(
+    original_pgn: str, game: chess.pgn.Game, headers: dict[str, str]) -> None:
+  """Either fixes the 'result' header, or raises InvalidGameError."""
+  # go over the moves, unfortunately we have to pay the price of going over redundantly
+  n_ply: int = 0
+  flags: PositionFlag = PositionFlag(0)
+  for n_ply, _, _, _, flags in IterateGame(game):
+    pass  # we just want to get to last recorded move
+  if n_ply:
+    for result_flag, result_pgn in RESULTS_FLAG_MAP.items():
+      if result_flag in flags:
+        # we found a game that had a very concrete ending result
+        headers['result'] = result_pgn
+        return
+  # as last resource we look into actual PGN to see if it has some recorded result at end
+  pgn_lines: list[str] = original_pgn.split('\n')
+  if pgn_lines[-1].strip() in RESULTS_PGN_MAP:
+    # found one
+    headers['result'] = pgn_lines[-1].strip()
+    return
+  # could not fix the problem, so we raise
+  raise InvalidGameError('Game has no recorded result and no clear end')
 
 
 class PGNData:
@@ -241,73 +314,56 @@ class PGNData:
 
   def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[int, int]:
     """Loads game into database. Returns (plys, new_positions)."""
+    n_ply: int = 0
     new_count: int = 0
-    n_ply: int = -1
-    board: chess.Board = game.board()
+    board: Optional[chess.Board] = None
     try:
-      # does this game contain errors?
-      if game.errors:
-        # game goes into errors list
-        raise InvalidGameError(GAME_ERRORS(game))
-      # game should be OK, so add to dict structure by going over the moves
+      # prepare to add to dict structure by going over the moves
       dict_pointer: dict[int, GamePosition] = self.db.positions
-      position: Optional[GamePosition] = None
-      new_flags = PositionFlag(0)
+      position: GamePosition = _EMPTY_POSITION
       game_headers: dict[str, str] = _GameMinimalHeaders(game)
-      # test for non-standard chess games
-      if board.chess960 or board.fen() != STANDARD_CHESS_FEN:
-        raise NonStandardGameError()
       # test for games we don't know the result of
-      game_result: str = game_headers.get('result', '?')
-      if game_result not in {'1-0', '0-1', '1/2-1/2'}:
-        raise InvalidGameError('Game has no recorded result')
+      if game_headers.get('result', '?') not in RESULTS_PGN_MAP:
+        _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
       # go over the moves
-      for n_ply, move in enumerate(game.mainline_moves()):
-        # push the move to the board
-        encoded_ply: int = EncodePly(move)
-        san: str = board.san(move)
-        if not board.is_legal(move):
-          raise InvalidGameError(f'Invalid move at {san} with {board.fen()!r}')
-        board.push(move)
+      for n_ply, san, encoded_ply, board, flags in IterateGame(game):
         # add to dictionary, if needed
         if encoded_ply not in dict_pointer:
-          # new entry, check if position is valid
-          if (board_status := board.status()) or not board.is_valid():
-            raise InvalidGameError(f'Invalid position ({board_status!r}) at {san} with {board.fen()!r}')
           # add the position
           new_count += 1
-          new_flags = _CreatePositionFlags(board, san, new_flags)
-          dict_pointer[encoded_ply] = GamePosition(plys={}, flags=new_flags, games=None)
+          dict_pointer[encoded_ply] = GamePosition(plys={}, flags=flags, games=None)
           # check for unexpected game endings
-          for end_flag, expected_result in [
-              (PositionFlag.WHITE_WIN, '1-0'),
-              (PositionFlag.BLACK_WIN, '0-1'),
-              (PositionFlag.DRAWN_GAME, '1/2-1/2')]:
-            if end_flag in new_flags and game_result != expected_result:
+          for end_flag, expected_result in RESULTS_FLAG_MAP.items():
+            if end_flag in flags and game_headers['result'] != expected_result:
               raise InvalidGameError(
-                  f'Game result {game_result} should be {expected_result} at {san} with {board.fen()!r}')
+                  f'Game result {game_headers["result"]} should '
+                  f'be {expected_result} at {san} with {board.fen()!r}')
         # move the pointer
         position = dict_pointer[encoded_ply]
         dict_pointer = position.plys
-      # game has ended
-      if not position:
+      # reached end of game
+      if board is None:
         # game had no moves, we will consider this an "error" game
         raise EmptyGameError()
       # we have a valid game, so we must add the game here
       if position.games is None:
         position.games = []
       position.games.append(game_headers)  # TODO: we have to treat repeated games imported
-      return (n_ply + 1, new_count)
+      return (n_ply, new_count)
     except EmptyGameError:
+      # empty game, no moves
       self.db.empty_games.append(ErrorGame(pgn=original_pgn, error='Game has no moves'))
       return (0, 0)
     except NonStandardGameError:
+      # some kind of non-standard chess game
       self.db.non_standard_games.append(ErrorGame(
           pgn=original_pgn,
-          error=f'Non-standard chess{"960" if board.chess960 else ""} game: {board.fen()!r}'))
+          error=f'Non-standard chess{"960" if board and board.chess960 else ""} '
+                f'game: {board.fen() if board else "?"!r}'))
       return (0, 0)
     except InvalidGameError as err:
+      # all other parsing errors
       error_game = ErrorGame(pgn=original_pgn, error=err.args[0])
       self.db.error_games.append(error_game)
       logging.warning(str(error_game))
-      return (n_ply + 1, new_count)
+      return (n_ply, new_count)

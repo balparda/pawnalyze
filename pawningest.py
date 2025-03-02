@@ -215,12 +215,12 @@ def _LoadFromURL(
         plys, nodes = db.LoadGame(pgn, game)
         ply_count += plys
         node_count += nodes
-        if not game_count % 5000 and game_count:
+        if not game_count % 10000 and game_count:
           delta: float = time.time() - processing_start
           logging.info(
-              'Loaded %d games (%d plys, %d nodes) in %s '
+              'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
               '(%0.1f games/s average = %s per million games)',
-              game_count, ply_count, node_count,
+              game_count, ply_count, node_count, 100.0 * (ply_count - node_count) / ply_count,
               base.HumanizedSeconds(delta), game_count / delta,
               base.HumanizedSeconds(1000000.0 * delta / game_count))
       else:
