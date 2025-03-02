@@ -12,6 +12,7 @@ import logging
 import os
 import os.path
 # import pdb
+import sys
 from typing import Any, BinaryIO, Callable, Generator, Optional
 
 import chess
@@ -299,12 +300,19 @@ def _FixGameResultHeaderOrRaise(
 class PGNData:
   """A PGN Database for Pawnalyze."""
 
+  _RECURSION_LIMIT = 10000  # default is usually 1000: sys.getrecursionlimit()
+
   def __init__(self) -> None:
     """Constructor."""
     # check data directory is there
     if not os.path.exists(_PGN_DATA_DIR):
       os.makedirs(_PGN_DATA_DIR)
       logging.info('Created empty data dir %r', _PGN_DATA_DIR)
+    # increase recursion limit so pickle will work with larger structures
+    if (old_recursion := sys.getrecursionlimit()) < PGNData._RECURSION_LIMIT:
+      logging.info(
+          'Changing recursion limit from %d to %d', old_recursion, PGNData._RECURSION_LIMIT)
+      sys.setrecursionlimit(PGNData._RECURSION_LIMIT)
     # load data file, create if empty
     self.db: LoadedGames = LoadedGames(
         positions={}, empty_games=[], non_standard_games=[], error_games=[])
