@@ -127,6 +127,10 @@ class PositionFlag(enum.Flag):
   MOVES_50 = enum.auto()       # one side can claim draw
   MOVES_75 = enum.auto()       # since 2014-7-1 this game is automatically drawn
   # <<== add new stuff to the end!
+  # TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
+  IS_BEST_PLAY = enum.auto()          # is the best stockfish play
+  WHITE_FORCED_MATE_20 = enum.auto()  # white has forced mate in <=20 plys
+  BLACK_FORCED_MATE_20 = enum.auto()  # black has forced mate in <=20 plys
 
 
 RESULTS_FLAG_MAP: dict[PositionFlag, str] = {
@@ -276,22 +280,31 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
 def _FixGameResultHeaderOrRaise(
     original_pgn: str, game: chess.pgn.Game, headers: dict[str, str]) -> None:
   """Either fixes the 'result' header, or raises InvalidGameError."""
+  if headers.get('result', '*') not in RESULTS_PGN_MAP:
+    return  # all is already OK
   # go over the moves, unfortunately we have to pay the price of going over redundantly
   n_ply: int = 0
   flags: PositionFlag = PositionFlag(0)
+  result_pgn: str
   for n_ply, _, _, _, flags in IterateGame(game):
     pass  # we just want to get to last recorded move
   if n_ply:
     for result_flag, result_pgn in RESULTS_FLAG_MAP.items():
       if result_flag in flags:
         # we found a game that had a very concrete ending result
+        logging.info(
+            'Adopting forced result: %s -> %s (%r)', headers.get('result', '*'),
+            result_pgn, headers)
         headers['result'] = result_pgn
         return
   # as last resource we look into actual PGN to see if it has some recorded result at end
-  pgn_lines: list[str] = original_pgn.split('\n')
-  if pgn_lines[-1].strip() in RESULTS_PGN_MAP:
+  result_pgn = original_pgn.split('\n')[-1].strip()
+  if result_pgn and result_pgn in RESULTS_PGN_MAP:
     # found one
-    headers['result'] = pgn_lines[-1].strip()
+    logging.info(
+        'Adopting PGN last-line result: %s -> %s (%r)', headers.get('result', '*'),
+        result_pgn, headers)
+    headers['result'] = result_pgn
     return
   # could not fix the problem, so we raise
   raise InvalidGameError('Game has no recorded result and no clear end')
@@ -338,8 +351,7 @@ class PGNData:
       position: GamePosition = _EMPTY_POSITION
       game_headers: dict[str, str] = _GameMinimalHeaders(game)
       # test for games we don't know the result of
-      if game_headers.get('result', '?') not in RESULTS_PGN_MAP:
-        _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
+      _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
       # go over the moves
       for n_ply, san, encoded_ply, board, flags in IterateGame(game):
         # add to dictionary, if needed
@@ -348,11 +360,10 @@ class PGNData:
           new_count += 1
           dict_pointer[encoded_ply] = GamePosition(plys={}, flags=flags, games=None)
           # check for unexpected game endings
-          for end_flag, expected_result in RESULTS_FLAG_MAP.items():
-            if end_flag in flags and game_headers['result'] != expected_result:
-              raise InvalidGameError(
-                  f'Game result {game_headers["result"]} should '
-                  f'be {expected_result} at {san} with {board.fen()!r}')
+          if ((PositionFlag.WHITE_WIN in flags or PositionFlag.BLACK_WIN in flags) and
+              game_headers['result'] == '1/2-1/2'):
+            raise InvalidGameError(
+                f'Draw result 1/2-1/2 should be {flags} at {n_ply}/{san} with {board.fen()!r}')
         # move the pointer
         position = dict_pointer[encoded_ply]
         dict_pointer = position.plys
@@ -363,7 +374,7 @@ class PGNData:
       # we have a valid game, so we must add the game here
       if position.games is None:
         position.games = []
-      position.games.append(game_headers)  # TODO: we have to treat repeated games imported
+      position.games.append(game_headers)  # TODO: we have to treat repeated games imported; bias to discard if deeper than N plys (40?)
       return (n_ply, new_count)
     except EmptyGameError:
       # empty game, no moves
@@ -382,3 +393,7 @@ class PGNData:
       self.db.error_games.append(error_game)
       logging.warning(str(error_game))
       return (n_ply, new_count)
+
+  # TODO: add a method for trimming the tree of nodes without games
+
+  # TODO: add a method for duplicate game in a node detection
