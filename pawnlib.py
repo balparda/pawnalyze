@@ -118,7 +118,8 @@ class PositionFlag(enum.Flag):
   CHECK = enum.auto()      # is the current side to move in check
   CHECKMATE = enum.auto()  # is the current position checkmate
   STALEMATE = enum.auto()  # is the current position stalemate
-  INSUFFICIENT_MATERIAL = enum.auto()  # neither side has sufficient winning material
+  WHITE_INSUFFICIENT_MATERIAL = enum.auto()  # white does not have sufficient winning material
+  BLACK_INSUFFICIENT_MATERIAL = enum.auto()  # black does not have sufficient winning material
   REPETITIONS_3 = enum.auto()  # one side can claim draw
   REPETITIONS_5 = enum.auto()  # since 2014-7-1 this game is automatically drawn
   # ATTENTION: checking for repetitions is costly for the chess library!
@@ -238,7 +239,6 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
       (board.is_check, PositionFlag.CHECK),
       (board.is_checkmate, PositionFlag.CHECKMATE),
       (board.is_stalemate, PositionFlag.STALEMATE),
-      (board.is_insufficient_material, PositionFlag.INSUFFICIENT_MATERIAL),
       (board.is_repetition, PositionFlag.REPETITIONS_3),
       (board.is_fivefold_repetition, PositionFlag.REPETITIONS_5),
       (board.is_fifty_moves, PositionFlag.MOVES_50),
@@ -247,6 +247,12 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
   for method, flag in position_checks:
     if method():
       flags |= flag
+  # check material
+  for color, material_flag in {
+      chess.WHITE: PositionFlag.WHITE_INSUFFICIENT_MATERIAL,
+      chess.BLACK: PositionFlag.BLACK_INSUFFICIENT_MATERIAL}.items():
+    if board.has_insufficient_material(color):
+      flags |= material_flag
   # add mandatory winning conditions
   if PositionFlag.CHECKMATE in flags and PositionFlag.BLACK_TO_MOVE in flags:
     flags |= PositionFlag.WHITE_WIN
@@ -254,7 +260,8 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
     flags |= PositionFlag.BLACK_WIN
   # add mandatory draw positions
   if (PositionFlag.STALEMATE in flags or
-      PositionFlag.INSUFFICIENT_MATERIAL in flags or  # TODO: check insufficient material white/black
+      (PositionFlag.WHITE_INSUFFICIENT_MATERIAL in flags and
+       PositionFlag.BLACK_INSUFFICIENT_MATERIAL in flags) or
       PositionFlag.REPETITIONS_5 in flags or
       PositionFlag.MOVES_75 in flags):
     flags |= PositionFlag.DRAWN_GAME
