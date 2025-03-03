@@ -16,6 +16,7 @@ import sys
 from typing import Any, BinaryIO, Callable, Generator, Optional
 
 import chess
+import chess.engine
 import chess.pgn
 
 from baselib import base
@@ -161,12 +162,30 @@ class LoadedGames:
   error_games: list[ErrorGame]         # the games that have errors and cannot be used
 
 
+_EMPTY_HEADER_VALUES: set[str] = {
+    '?', '??', '???', '????',
+    'x', 'xx', 'xxx', 'xxxx',
+    '-', '--', '---', '----',
+    '*', '**', '***', '****',
+    '#', '##', '###', '####',
+    '.', '..', '...', '....',
+    '????.??.??', 'xxxx.xx.xx', '####.##.##',
+    '????.??', 'xxxx.xx', '####.##',
+    'n/a', 'unknown', 'none', 'no',
+    'no date', 'no name', 'no event',
+}
+
+
 def _GameMinimalHeaders(game: chess.pgn.Game) -> dict[str, str]:
   """Return a dict with only parsed/relevant content."""
   headers: dict[str, str] = {}
+  date_ending: Callable[[str], bool] = lambda y: any(
+      y.endswith(x) for x in ('.??', '.xx', '.XX', '.**', '.##'))
   for k, v in game.headers.items():
-    v = v.strip()
-    if not v or v in {'?', '*', '????.??.??'}:
+    v: str = v.strip()
+    v = v[:-3] if date_ending(v) else v
+    v = v[:-3] if date_ending(v) else v  # second time to take care of '1992.??.??'
+    if not v or v.lower() in _EMPTY_HEADER_VALUES:
       continue  # skip any empty or default value
     headers[k.lower()] = v
   return headers
@@ -280,7 +299,7 @@ def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) 
 def _FixGameResultHeaderOrRaise(
     original_pgn: str, game: chess.pgn.Game, headers: dict[str, str]) -> None:
   """Either fixes the 'result' header, or raises InvalidGameError."""
-  if headers.get('result', '*') not in RESULTS_PGN_MAP:
+  if headers.get('result', '*') in RESULTS_PGN_MAP:
     return  # all is already OK
   # go over the moves, unfortunately we have to pay the price of going over redundantly
   n_ply: int = 0
@@ -308,6 +327,79 @@ def _FixGameResultHeaderOrRaise(
     return
   # could not fix the problem, so we raise
   raise InvalidGameError('Game has no recorded result and no clear end')
+
+
+_PLY_LAX_COMPARISON_DEPTH: int = 40  # i.e., if game is beyond 20th move and is much less likely to repeat
+
+
+def _HeaderCompare(
+    ha: dict[str, str], hb: dict[str, str], ply_depth: int) -> tuple[
+        bool, Optional[dict[str, str]]]:
+  """Compare 2 dict headers, ha and hb. If equal also return a new merged header dict.
+
+  Args:
+    ha: Header dict A
+    hb: Header dict B
+
+  Returns:
+    (is_equal, merged_header) ; merged_header will only be present if is_equal is True
+                                and is a new object (not header A nor header B)
+  """
+  # TODO: rewrite... this is bad
+  # first just shallow compare
+  if ha == hb:
+    return (True, ha.copy())  # shallow copy should work for now
+  # first look at 'result': if it is different then games are not the same most probably
+  result_a: str = ha.get('result', '*')
+  result_b: str = hb.get('result', '*')
+  if result_a not in RESULTS_PGN_MAP or result_b not in RESULTS_PGN_MAP:
+    raise ValueError(f'Invalid result/game {ha!r} / {hb!r}')
+  if result_a != result_b:
+    return (False, None)
+  # we should have the same 'result'...
+  # look at 'date': if it is different and significant, then not the same most probably
+  date_a: str = ha.get('date', '?')
+  date_b: str = hb.get('date', '?')
+  if date_a != date_b:
+    return (False, None)
+  # we should have the same 'date'/'result' but date might not be significant...
+  if ply_depth > _PLY_LAX_COMPARISON_DEPTH and (len(date_a) > 4 or len(date_b) > 4):
+    # HEURISTIC: dates can be determinative at high ply counts
+    return (True, _HeaderMerge(ha, hb))
+  # look at names
+  white_a: str = _NormalizeNames(ha.get('white', '?'))
+  white_b: str = _NormalizeNames(hb.get('white', '?'))
+  black_a: str = _NormalizeNames(ha.get('black', '?'))
+  black_b: str = _NormalizeNames(hb.get('black', '?'))
+  if white_a != white_b or black_a != black_b:
+    return (False, None)
+  # we should have the same 'date'/'result'/'white'/'black' but date/names might not be significant...
+  # HEURISTIC: can we suppose they are the same now?
+  return (True, _HeaderMerge(ha, hb))
+
+
+_NormalizeNames: Callable[[str], str] = lambda n: (
+    ' '.join(n.lower().split(', ', 1)[::-1]) if ', ' in n else n.lower())
+
+
+def _HeaderMerge(ha: dict[str, str], hb: dict[str, str]) -> dict[str, str]:
+  """Merge 2 headers avoiding losses."""
+  # TODO: rewrite... this is bad
+  # start with ha
+  hm: dict[str, str] = ha.copy()
+  # carefully copy hb into it:
+  for k, v in hb.items():
+    if k in hm:
+      # key already exists: append if different, leave if equal
+      orig_v: str = hm[k]
+      if k in {'white', 'black'} and _NormalizeNames(v) == _NormalizeNames(orig_v):
+        continue
+      if v != orig_v:
+        hm[k] = f'{orig_v} | {v}'
+    else:
+      # new key: add
+      hm[k] = v
+  return hm
 
 
 class PGNData:
@@ -362,6 +454,7 @@ class PGNData:
           # check for unexpected game endings
           if ((PositionFlag.WHITE_WIN in flags or PositionFlag.BLACK_WIN in flags) and
               game_headers['result'] == '1/2-1/2'):
+            # TODO: if the last move is literally the checkmate, then we can correct the result too
             raise InvalidGameError(
                 f'Draw result 1/2-1/2 should be {flags} at {n_ply}/{san} with {board.fen()!r}')
         # move the pointer
@@ -374,7 +467,17 @@ class PGNData:
       # we have a valid game, so we must add the game here
       if position.games is None:
         position.games = []
-      position.games.append(game_headers)  # TODO: we have to treat repeated games imported; bias to discard if deeper than N plys (40?)
+      for i, g in enumerate(position.games):
+        g_equal: bool
+        g_merge: Optional[dict[str, str]]
+        g_equal, g_merge = _HeaderCompare(game_headers, g, n_ply)
+        if g_equal and game_headers != g:
+          logging.info('Merge: \n%r + \n%r = \n%r', g, game_headers, g_merge)
+          position.games.pop(i)
+          position.games.append(g_merge if g_merge else {})
+          break
+      else:
+        position.games.append(game_headers)
       return (n_ply, new_count)
     except EmptyGameError:
       # empty game, no moves
@@ -397,3 +500,41 @@ class PGNData:
   # TODO: add a method for trimming the tree of nodes without games
 
   # TODO: add a method for duplicate game in a node detection
+
+
+def FindBestMove(
+    fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, int]:
+  """Finds the best move for a position (FEN) up to a depth.
+
+  Args:
+    fen: FEN string to use
+    depth: (default 20) ply depth to search
+    engine_path: (default 'stockfish') the engine path to invoke
+
+  Returns:
+    (best_move, mate_in_n), where best_move is a chess.Move and mate_in_n can be:
+        0 = no forced mate found
+        +N (positive) = side to move mates in N
+        -N (negative) = opponent side mates in abs(N)
+  """
+  # open Stockfish in UCI mode
+  with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+    # ask for an analysis from engine
+    info: chess.List[chess.engine.InfoDict] = engine.analyse(
+        chess.Board(fen),
+        limit=chess.engine.Limit(depth=depth),
+        info=chess.engine.INFO_ALL,  # to get full data
+        multipv=1  # We only want the single best line
+    )
+    # check the result is as expected; best move is first move of best line
+    if len(info) != 1 or not info[0].get('pv', None) or not info[0].get('score', None):
+      raise RuntimeError(f'No principal variation or score returned by engine for FEN: {fen!r}')
+    best_move: chess.Move = info[0]['pv'][0]  # type:ignore
+    # check if the engine sees a forced mate from the current position
+    mate_in: int = 0
+    relative_score: chess.engine.Score = info[0]['score'].relative  # type:ignore
+    if relative_score.is_mate() and (n_mate := relative_score.mate()):
+      # mate_in > 0 => side to move is mating in n_mate moves
+      # mate_in < 0 => the opponent is mating in abs(n_mate) moves
+      mate_in = n_mate
+    return (best_move, mate_in)
