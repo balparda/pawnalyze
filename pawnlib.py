@@ -8,10 +8,12 @@
 import dataclasses
 import enum
 import hashlib
+import json
 import logging
 import os
 import os.path
 # import pdb
+import sqlite3
 import sys
 from typing import Any, BinaryIO, Callable, Generator, Optional
 
@@ -32,6 +34,7 @@ _PGN_CACHE_FILE: str = os.path.join(_PGN_CACHE_DIR, 'cache.bin')
 # PGN data directory
 _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
 _PGN_DATA_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games-db.bin')
+_PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 
 # useful
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
@@ -105,33 +108,35 @@ class ErrorGame:
   error: str  # error given by chess module
 
 
+# TODO: this must be game agnostic for the SQLite solution, DRAWN_GAME and friends must go!
 class PositionFlag(enum.Flag):
   """States a position might be in."""
   # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
   # you will corrupt the database!! DO NOT REORDER LIST!
+  # Was using enum.auto() but hardcoded values to help avoid data corruption.
   # the conditions below are mandatory (by the rules) and depend only on the board
-  WHITE_TO_MOVE = enum.auto()  # white moves in this position
-  BLACK_TO_MOVE = enum.auto()  # black moves in this position
-  DRAWN_GAME = enum.auto()     # STALEMATE | INSUFFICIENT_MATERIAL | REPETITIONS_5 | MOVES_75
-  GAME_CONTINUED_AFTER_MANDATORY_DRAW = enum.auto()  # position after game should have drawn
-  WHITE_WIN = enum.auto()      # BLACK_TO_MOVE & CHECKMATE
-  BLACK_WIN = enum.auto()      # WHITE_TO_MOVE & CHECKMATE
+  WHITE_TO_MOVE = 1 << 0  # white moves in this position
+  BLACK_TO_MOVE = 1 << 1  # black moves in this position
+  DRAWN_GAME = 1 << 2     # STALEMATE | (W&B)_INSUFFICIENT_MATERIAL | REPETITIONS_5 | MOVES_75
+  GAME_CONTINUED_AFTER_MANDATORY_DRAW = 1 << 3  # position after game should have drawn
+  WHITE_WIN = 1 << 4      # BLACK_TO_MOVE & is CHECKMATE
+  BLACK_WIN = 1 << 5      # WHITE_TO_MOVE & is CHECKMATE
   # the checks below do not depend on the player's intentions (are mandatory)
-  CHECK = enum.auto()      # is the current side to move in check
-  CHECKMATE = enum.auto()  # is the current position checkmate
-  STALEMATE = enum.auto()  # is the current position stalemate
-  WHITE_INSUFFICIENT_MATERIAL = enum.auto()  # white does not have sufficient winning material
-  BLACK_INSUFFICIENT_MATERIAL = enum.auto()  # black does not have sufficient winning material
-  REPETITIONS_3 = enum.auto()  # one side can claim draw
-  REPETITIONS_5 = enum.auto()  # since 2014-7-1 this game is automatically drawn
+  CHECK = 1 << 6      # is the current side to move in check
+  CHECKMATE = 1 << 7  # is the current position checkmate
+  STALEMATE = 1 << 8  # is the current position stalemate
+  WHITE_INSUFFICIENT_MATERIAL = 1 << 9   # white does not have sufficient winning material
+  BLACK_INSUFFICIENT_MATERIAL = 1 << 10  # black does not have sufficient winning material
+  REPETITIONS_3 = 1 << 11  # one side can claim draw
+  REPETITIONS_5 = 1 << 12  # since 2014-7-1 this game is automatically drawn
   # ATTENTION: checking for repetitions is costly for the chess library!
-  MOVES_50 = enum.auto()       # one side can claim draw
-  MOVES_75 = enum.auto()       # since 2014-7-1 this game is automatically drawn
+  MOVES_50 = 1 << 13       # one side can claim draw
+  MOVES_75 = 1 << 14       # since 2014-7-1 this game is automatically drawn
+  IS_BEST_PLAY = 1 << 15         # is the best stockfish play
+  WHITE_FORCED_MATE = 1 << 16  # white has forced mate in <=N plys (where N depends on ply depth execution)
+  BLACK_FORCED_MATE = 1 << 17  # black has forced mate in <=N plys
   # <<== add new stuff to the end!
   # TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
-  IS_BEST_PLAY = enum.auto()          # is the best stockfish play
-  WHITE_FORCED_MATE_20 = enum.auto()  # white has forced mate in <=20 plys
-  BLACK_FORCED_MATE_20 = enum.auto()  # black has forced mate in <=20 plys
 
 
 RESULTS_FLAG_MAP: dict[PositionFlag, str] = {
@@ -500,6 +505,186 @@ class PGNData:
   # TODO: add a method for trimming the tree of nodes without games
 
   # TODO: add a method for duplicate game in a node detection
+
+
+class ErrorGameCategory(enum.Flag):
+  """Game error categories in DB."""
+  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
+  # you will corrupt the database!! DO NOT REORDER LIST!
+  # Was using enum.auto() but hardcoded values to help avoid data corruption.
+  EMPTY_GAME = 1 << 0          # game with no moves
+  NON_STANDARD_CHESS = 1 << 1  # chess960 or handicap or incomplete game or any non-standard
+  LIBRARY_ERROR = 1 << 2       # error reported by loading library
+  INVALID_POSITION = 1 << 3    # invalid position found
+  INVALID_MOVE = 1 << 4        # invalid move found
+  ENDING_ERROR = 1 << 5        # game ending has some problem
+
+
+class PGNDataSQLite:
+  """A PGN Database for Pawnalyze using SQLite."""
+
+  _POSITIONS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS positions (
+        position_hash TEXT PRIMARY KEY,
+        flags INTEGER NOT NULL,  -- PositionFlag integer
+        game_headers TEXT        -- JSON array of game headers or NULL
+    );
+    """
+
+  _MOVES_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS moves (
+        from_position_hash TEXT NOT NULL,
+        ply INTEGER NOT NULL,
+        to_position_hash TEXT NOT NULL,
+        PRIMARY KEY(from_position_hash, ply)
+    );
+    """
+
+  _ERROR_GAMES_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS error_games (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category INTEGER NOT NULL,  -- ErrorGameCategory integer
+        pgn TEXT NOT NULL,
+        error TEXT NOT NULL
+    );
+    """
+
+  def __init__(self) -> None:
+    """Open or create the SQLite DB."""
+    # check data directory is there
+    if not os.path.exists(_PGN_DATA_DIR):
+      os.makedirs(_PGN_DATA_DIR)
+      logging.info('Created empty data dir %r', _PGN_DATA_DIR)
+    # open DB, create if empty
+    exists_db: bool = os.path.exists(_PGN_SQL_FILE)
+    self._conn: sqlite3.Connection = sqlite3.connect(_PGN_SQL_FILE)
+    self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
+    if exists_db:
+      logging.info('Opening SQLite DB in %r', _PGN_SQL_FILE)
+    else:
+      logging.info('Creating new SQLite DB in %r', _PGN_SQL_FILE)
+      self._EnsureSchema()
+
+  def Close(self) -> None:
+    """Close the database connection."""
+    self._conn.close()
+
+  def _EnsureSchema(self) -> None:
+    """Create tables if they do not exist."""
+    self._conn.execute(PGNDataSQLite._POSITIONS_SCHEMA)
+    self._conn.execute(PGNDataSQLite._MOVES_SCHEMA)
+    self._conn.execute(PGNDataSQLite._ERROR_GAMES_SCHEMA)
+    self._conn.commit()
+
+  def DropAllTables(self) -> None:
+    """Drop all tables from the database (destructive operation)."""
+    cursor: sqlite3.Cursor = self._conn.cursor()
+    cursor.execute('DROP TABLE IF EXISTS error_games;')
+    cursor.execute('DROP TABLE IF EXISTS moves;')
+    cursor.execute('DROP TABLE IF EXISTS positions;')
+    self._conn.commit()
+    logging.warning('Dropped all database tables')
+
+  def DeleteDBFile(self) -> None:
+    """Closes connection and deletes the entire DB file from disk."""
+    self._conn.close()
+    if os.path.exists(_PGN_SQL_FILE):
+      os.remove(_PGN_SQL_FILE)
+      logging.warning('Deleted database file %r', _PGN_SQL_FILE)
+
+  def WipeData(self) -> None:
+    """Delete data."""
+    self.DropAllTables()
+    self.DeleteDBFile()
+
+  def InsertPosition(
+      self, position_hash: str, flags: PositionFlag,
+      game_headers: Optional[list[dict[str, str]]]) -> None:
+    """Insert a position, or update if existing by adding game headers."""
+    cur: sqlite3.Cursor = self._conn.cursor()
+    # check if position_hash exists
+    cur.execute(
+        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash,))
+    row = cur.fetchone()
+    if row:
+      # we already have this position, so we check if flags are consistent and add headers, if any
+      existing_flags, existing_json = row
+      if existing_flags != flags:
+        raise ValueError(
+            f'Conflicting flags for position {position_hash}: '
+            f'{existing_flags} (old) versus {flags} (new)')
+      # look at headers, if needed
+      if game_headers:
+        # merge any new game headers
+        existing_headers = [] if existing_json is None else json.loads(existing_json)
+        updated_headers: str = json.dumps(existing_headers.extend(game_headers))
+      else:
+        updated_headers = existing_json
+      # save
+      cur.execute("""
+          UPDATE positions
+          SET flags = ?, game_headers = ?
+          WHERE position_hash = ?
+      """, (flags, updated_headers, position_hash))
+    else:
+      # brand new entry
+      headers_json: Optional[str] = json.dumps(game_headers) if game_headers else None
+      cur.execute("""
+          INSERT INTO positions (position_hash, flags, game_headers)
+          VALUES (?, ?, ?)
+      """, (position_hash, flags.value, headers_json))
+    self._conn.commit()
+
+  def GetPosition(
+      self, position_hash: str) -> tuple[Optional[PositionFlag], Optional[list[dict[str, str]]]]:
+    """
+    Retrieve the PositionFlag for the given hash. Returns None if not found.
+    """
+    cursor: sqlite3.Cursor = self._conn.cursor()
+    cursor.execute(
+        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash,))
+    row = cursor.fetchone()
+    if row is None:
+      return (None, None)
+    flag = PositionFlag(row[0])
+    if row[1] is None:
+      return (flag, None)
+    headers: Optional[list[dict[str, str]]] = json.loads(existing_json)
+    return (flag, headers if headers else None)
+
+  def InsertMove(self, from_hash: str, ply: int, to_hash: str) -> None:
+    """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
+    cursor: sqlite3.Cursor = self._conn.cursor()
+    cursor.execute("""
+        INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash)
+        VALUES(?, ?, ?)
+    """, (from_hash, ply, to_hash))
+    self._conn.commit()
+
+  def GetMoves(self, position_hash: str) -> list[tuple[int, str]]:
+    """Return a list of (ply, to_position_hash) for the given from_position_hash."""
+    cursor: sqlite3.Cursor = self._conn.cursor()
+    cursor.execute("""
+        SELECT ply, to_position_hash
+        FROM position_moves
+        WHERE from_position_hash = ?;
+    """, (position_hash,))
+    return cursor.fetchall()
+
+  def InsertErrorGame(self, category: ErrorGameCategory, pgn: str, error: str) -> None:
+    """Insert an error game entry."""
+    cursor: sqlite3.Cursor = self._conn.cursor()
+    cursor.execute("""
+        INSERT INTO error_games(category, pgn, error)
+        VALUES (?, ?, ?)
+    """, (category, pgn, error))
+    self._conn.commit()
+
+  def GetErrorGames(self) -> list[tuple[int, ErrorGameCategory, str, str]]:
+    """Return a list of all (id, category, pgn, error)."""
+    cursor: sqlite3.Cursor = self._conn.cursor()
+    cursor.execute('SELECT id, category, pgn, error FROM error_games;')
+    return [(i, ErrorGameCategory(c), p, e) for i, c, p, e in cursor.fetchall()]
 
 
 def FindBestMove(
