@@ -20,8 +20,10 @@ from typing import Any, BinaryIO, Callable, Generator, Optional
 import chess
 import chess.engine
 import chess.pgn
+import chess.polyglot
 
 from baselib import base
+from pawnalyze import pawnzobrist
 
 __author__ = 'balparda@gmail.com (Daniel Balparda)'
 __version__ = (1, 0)
@@ -33,7 +35,7 @@ _PGN_CACHE_FILE: str = os.path.join(_PGN_CACHE_DIR, 'cache.bin')
 
 # PGN data directory
 _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
-_PGN_DATA_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games-db.bin')
+_PGN_DATA_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games-db2.bin')
 _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 
 # useful
@@ -217,20 +219,26 @@ def DecodePly(ply: int) -> chess.Move:
 
 
 def IterateGame(game: chess.pgn.Game) -> Generator[
-    tuple[int, str, int, chess.Board, PositionFlag], None, None]:
+    tuple[int, str, int, tuple[pawnzobrist.Zobrist, pawnzobrist.Zobrist],
+          chess.Board, PositionFlag], None, None]:
   """Iterates a game, returning useful information of moves and board.
 
   Args:
     game: The game
 
   Yields:
-    (ply_counter, san_move, encoded_ply_move, board_obj, position_flags)
+    (ply_counter,
+     san_move,
+     encoded_ply_move, (zobrist_previous, zobrist_current),
+     board_obj, position_flags)
 
   Raises:
     NonStandardGameError: if non-traditional chess is detected
     InvalidGameError: if game object indicates errors or if illegal move/position is detected
   """
   board: chess.Board = game.board()
+  hasher: Callable[[chess.Board], int] = pawnzobrist.Zobrist.MakeHasher()
+  zobrist_previous: int = hasher(board)
   flags: PositionFlag = PositionFlag(0)
   # does this game contain errors?
   if game.errors:
@@ -250,7 +258,11 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
     if (board_status := board.status()) or not board.is_valid():
       raise InvalidGameError(f'Invalid position ({board_status!r}) at {san} with {board.fen()!r}')
     # yield useful move/position info
-    yield (n_ply + 1, san, EncodePly(move), board, _CreatePositionFlags(board, san, flags))
+    zobrist_current: int = hasher(board)
+    yield (n_ply + 1, san, EncodePly(move),
+           (pawnzobrist.Zobrist(zobrist_previous), pawnzobrist.Zobrist(zobrist_current)),
+           board, _CreatePositionFlags(board, san, flags))
+    zobrist_previous = zobrist_current
 
 
 def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) -> PositionFlag:
@@ -310,7 +322,7 @@ def _FixGameResultHeaderOrRaise(
   n_ply: int = 0
   flags: PositionFlag = PositionFlag(0)
   result_pgn: str
-  for n_ply, _, _, _, flags in IterateGame(game):
+  for n_ply, _, _, _, _, flags in IterateGame(game):
     pass  # we just want to get to last recorded move
   if n_ply:
     for result_flag, result_pgn in RESULTS_FLAG_MAP.items():
@@ -450,7 +462,7 @@ class PGNData:
       # test for games we don't know the result of
       _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
       # go over the moves
-      for n_ply, san, encoded_ply, board, flags in IterateGame(game):
+      for n_ply, san, encoded_ply, (z_previous, z_current), board, flags in IterateGame(game):
         # add to dictionary, if needed
         if encoded_ply not in dict_pointer:
           # add the position
@@ -525,17 +537,17 @@ class PGNDataSQLite:
 
   _POSITIONS_SCHEMA = """
     CREATE TABLE IF NOT EXISTS positions (
-        position_hash TEXT PRIMARY KEY,
-        flags INTEGER NOT NULL,  -- PositionFlag integer
-        game_headers TEXT        -- JSON array of game headers or NULL
+        position_hash INTEGER PRIMARY KEY,  -- 128 bit Zobrist
+        flags INTEGER NOT NULL,             -- PositionFlag integer
+        game_headers TEXT                   -- JSON array of game headers or NULL
     );
     """
 
   _MOVES_SCHEMA = """
     CREATE TABLE IF NOT EXISTS moves (
-        from_position_hash TEXT NOT NULL,
-        ply INTEGER NOT NULL,
-        to_position_hash TEXT NOT NULL,
+        from_position_hash INTEGER NOT NULL,  -- 128 bit Zobrist
+        ply INTEGER NOT NULL,                 -- encoded ply for move
+        to_position_hash INTEGER NOT NULL,    -- 128 bit Zobrist
         PRIMARY KEY(from_position_hash, ply)
     );
     """
@@ -598,20 +610,20 @@ class PGNDataSQLite:
     self.DeleteDBFile()
 
   def InsertPosition(
-      self, position_hash: str, flags: PositionFlag,
+      self, position_hash: pawnzobrist.Zobrist, flags: PositionFlag,
       game_headers: Optional[list[dict[str, str]]]) -> None:
     """Insert a position, or update if existing by adding game headers."""
     cur: sqlite3.Cursor = self._conn.cursor()
     # check if position_hash exists
     cur.execute(
-        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash,))
+        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash.z,))
     row = cur.fetchone()
     if row:
       # we already have this position, so we check if flags are consistent and add headers, if any
       existing_flags, existing_json = row
       if existing_flags != flags:
         raise ValueError(
-            f'Conflicting flags for position {position_hash}: '
+            f'Conflicting flags for position 0x{position_hash}: '
             f'{existing_flags} (old) versus {flags} (new)')
       # look at headers, if needed
       if game_headers:
@@ -625,24 +637,23 @@ class PGNDataSQLite:
           UPDATE positions
           SET flags = ?, game_headers = ?
           WHERE position_hash = ?
-      """, (flags, updated_headers, position_hash))
+      """, (flags, updated_headers, position_hash.z))
     else:
       # brand new entry
       headers_json: Optional[str] = json.dumps(game_headers) if game_headers else None
       cur.execute("""
           INSERT INTO positions (position_hash, flags, game_headers)
           VALUES (?, ?, ?)
-      """, (position_hash, flags.value, headers_json))
+      """, (position_hash,z, flags.value, headers_json))
     self._conn.commit()
 
   def GetPosition(
-      self, position_hash: str) -> tuple[Optional[PositionFlag], Optional[list[dict[str, str]]]]:
-    """
-    Retrieve the PositionFlag for the given hash. Returns None if not found.
-    """
+      self, position_hash: pawnzobrist.Zobrist) -> tuple[
+          Optional[PositionFlag], Optional[list[dict[str, str]]]]:
+    """Retrieve the PositionFlag for the given hash. Returns None if not found."""
     cursor: sqlite3.Cursor = self._conn.cursor()
     cursor.execute(
-        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash,))
+        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash.z,))
     row = cursor.fetchone()
     if row is None:
       return (None, None)
@@ -652,24 +663,26 @@ class PGNDataSQLite:
     headers: Optional[list[dict[str, str]]] = json.loads(existing_json)
     return (flag, headers if headers else None)
 
-  def InsertMove(self, from_hash: str, ply: int, to_hash: str) -> None:
+  def InsertMove(
+      self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
     """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
     cursor: sqlite3.Cursor = self._conn.cursor()
     cursor.execute("""
         INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash)
         VALUES(?, ?, ?)
-    """, (from_hash, ply, to_hash))
+    """, (from_hash.z, ply, to_hash.z))
     self._conn.commit()
 
-  def GetMoves(self, position_hash: str) -> list[tuple[int, str]]:
+  def GetMoves(
+      self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, pawnzobrist.Zobrist]]:
     """Return a list of (ply, to_position_hash) for the given from_position_hash."""
     cursor: sqlite3.Cursor = self._conn.cursor()
     cursor.execute("""
         SELECT ply, to_position_hash
         FROM position_moves
         WHERE from_position_hash = ?;
-    """, (position_hash,))
-    return cursor.fetchall()
+    """, (position_hash.z,))
+    return [(ply, pawnzobrist.Zobrist(z)) for ply, z in cursor.fetchall()]
 
   def InsertErrorGame(self, category: ErrorGameCategory, pgn: str, error: str) -> None:
     """Insert an error game entry."""
