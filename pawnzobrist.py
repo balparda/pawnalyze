@@ -17,7 +17,7 @@ __version__ = (1, 0)
 
 
 class Zobrist:
-  """Chess position hash.
+  """Chess position 128bit hash, Unique by [BOARD, TURN, CASTLING RIGHTS, EN PASSANT SQUARES].
 
     See: https://en.wikipedia.org/wiki/Zobrist_hashing
   """

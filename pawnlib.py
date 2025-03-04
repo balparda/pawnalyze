@@ -110,43 +110,67 @@ class ErrorGame:
   error: str  # error given by chess module
 
 
-# TODO: this must be game agnostic for the SQLite solution, DRAWN_GAME and friends must go!
 class PositionFlag(enum.Flag):
-  """States a position might be in."""
+  """States a position might be in. Must be position (Zobrist) agnostic."""
   # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
   # you will corrupt the database!! DO NOT REORDER LIST!
   # Was using enum.auto() but hardcoded values to help avoid data corruption.
-  # the conditions below are mandatory (by the rules) and depend only on the board
+  # The conditions below are mandatory (by the rules) and depend only on the
+  # Zobrist hash, which encodes: [BOARD, TURN, CASTLING RIGHTS, EN PASSANT SQUARES]
   WHITE_TO_MOVE = 1 << 0  # white moves in this position
   BLACK_TO_MOVE = 1 << 1  # black moves in this position
-  DRAWN_GAME = 1 << 2     # STALEMATE | (W&B)_INSUFFICIENT_MATERIAL | REPETITIONS_5 | MOVES_75
-  GAME_CONTINUED_AFTER_MANDATORY_DRAW = 1 << 3  # position after game should have drawn
-  WHITE_WIN = 1 << 4      # BLACK_TO_MOVE & is CHECKMATE
-  BLACK_WIN = 1 << 5      # WHITE_TO_MOVE & is CHECKMATE
-  # the checks below do not depend on the player's intentions (are mandatory)
-  CHECK = 1 << 6      # is the current side to move in check
-  CHECKMATE = 1 << 7  # is the current position checkmate
-  STALEMATE = 1 << 8  # is the current position stalemate
-  WHITE_INSUFFICIENT_MATERIAL = 1 << 9   # white does not have sufficient winning material
-  BLACK_INSUFFICIENT_MATERIAL = 1 << 10  # black does not have sufficient winning material
-  REPETITIONS_3 = 1 << 11  # one side can claim draw
-  REPETITIONS_5 = 1 << 12  # since 2014-7-1 this game is automatically drawn
-  # ATTENTION: checking for repetitions is costly for the chess library!
-  MOVES_50 = 1 << 13       # one side can claim draw
-  MOVES_75 = 1 << 14       # since 2014-7-1 this game is automatically drawn
-  IS_BEST_PLAY = 1 << 15         # is the best stockfish play
-  WHITE_FORCED_MATE = 1 << 16  # white has forced mate in <=N plys (where N depends on ply depth execution)
-  BLACK_FORCED_MATE = 1 << 17  # black has forced mate in <=N plys
+  CHECK = 1 << 2      # is the current side to move in check
+  CHECKMATE = 1 << 3  # is the current position checkmate
+  STALEMATE = 1 << 4  # is the current position stalemate
+  WHITE_INSUFFICIENT_MATERIAL = 1 << 5   # white does not have sufficient winning material
+  BLACK_INSUFFICIENT_MATERIAL = 1 << 6  # black does not have sufficient winning material
   # <<== add new stuff to the end!
-  # TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
 
 
-RESULTS_FLAG_MAP: dict[PositionFlag, str] = {
-    PositionFlag.WHITE_WIN: '1-0',
-    PositionFlag.BLACK_WIN: '0-1',
-    PositionFlag.DRAWN_GAME: '1/2-1/2',
+WHITE_WIN: Callable[[PositionFlag], bool] = lambda f: (
+    PositionFlag.CHECKMATE in f and PositionFlag.BLACK_TO_MOVE in f)
+BLACK_WIN: Callable[[PositionFlag], bool] = lambda f: (
+    PositionFlag.CHECKMATE in f and PositionFlag.WHITE_TO_MOVE in f)
+DRAWN_GAME: Callable[[PositionFlag], bool] = lambda f: (
+    PositionFlag.STALEMATE in f or (PositionFlag.WHITE_INSUFFICIENT_MATERIAL in f and
+                                    PositionFlag.BLACK_INSUFFICIENT_MATERIAL in f))
+
+
+class ExtraInsightPositionFlag(enum.Flag):
+  """States a position might be in that are not necessarily Zobrist Agnostic."""
+  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
+  # you will corrupt the database!! DO NOT REORDER LIST!
+  # ATTENTION: checking for repetitions is costly for the chess library!
+  # repeated game position counters
+  REPETITIONS_3 = 1 << 10  # one side can claim draw (3x repetition rule)
+  REPETITIONS_5 = 1 << 11  # since 2014-7-1 this game is automatically drawn (5x repetition rule)
+  # halfmoves that have elapsed without a capture or pawn move counters
+  MOVES_50 = 1 << 12       # one side can claim draw (50 moves rule)
+  MOVES_75 = 1 << 13       # since 2014-7-1 this game is automatically drawn (75 moves rule)
+  GAME_CONTINUED_AFTER_MANDATORY_DRAW = 1 << 14  # position *after* game should have drawn
+  # <<== add new stuff to the end!
+
+
+DRAWN_GAME_EXTRA: Callable[[PositionFlag, ExtraInsightPositionFlag], bool] = lambda p, e: (
+    DRAWN_GAME(p) or
+    ExtraInsightPositionFlag.REPETITIONS_5 in e or ExtraInsightPositionFlag.MOVES_75 in e)
+CAN_CLAIM_DRAW: Callable[[ExtraInsightPositionFlag], bool] = lambda f: (
+    ExtraInsightPositionFlag.REPETITIONS_3 in f or ExtraInsightPositionFlag.MOVES_50 in f)
+
+
+RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
+    '1-0': WHITE_WIN,
+    '0-1': BLACK_WIN,
+    '1/2-1/2': DRAWN_GAME,
 }
-RESULTS_PGN_MAP: dict[str, PositionFlag] = {v: k for k, v in RESULTS_FLAG_MAP.items()}
+
+
+@dataclasses.dataclass
+class EngineResult:
+  """Analysis engine result."""
+  ply: int             # the best found continuation
+  score: int           # if present (not mate): the score in centi-pawns
+  mate: Optional[int]  # if present: > 0 => side to move is mating in 'mate' moves; < 0 => opponent is mating in abs(mate) moves
 
 
 @dataclasses.dataclass
@@ -154,10 +178,12 @@ class GamePosition:
   """Game position."""
   plys: dict[int, Any]                   # the next found continuations {ply: GamePosition}
   flags: PositionFlag                    # the status of this position
+  engine: Optional[EngineResult]         # if given, the result of the engine computation
   games: Optional[list[dict[str, str]]]  # list of PGN headers that end in this position
 
 
-_EMPTY_POSITION: GamePosition = GamePosition(plys={}, flags=PositionFlag(0), games=None)
+_EMPTY_POSITION: GamePosition = GamePosition(
+    plys={}, flags=PositionFlag(0), engine=None, games=None)
 
 
 @dataclasses.dataclass
@@ -220,7 +246,7 @@ def DecodePly(ply: int) -> chess.Move:
 
 def IterateGame(game: chess.pgn.Game) -> Generator[
     tuple[int, str, int, tuple[pawnzobrist.Zobrist, pawnzobrist.Zobrist],
-          chess.Board, PositionFlag], None, None]:
+          chess.Board, PositionFlag, ExtraInsightPositionFlag], None, None]:
   """Iterates a game, returning useful information of moves and board.
 
   Args:
@@ -230,7 +256,7 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
     (ply_counter,
      san_move,
      encoded_ply_move, (zobrist_previous, zobrist_current),
-     board_obj, position_flags)
+     board_obj, position_flags, extra_flags)
 
   Raises:
     NonStandardGameError: if non-traditional chess is detected
@@ -240,6 +266,7 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
   hasher: Callable[[chess.Board], int] = pawnzobrist.Zobrist.MakeHasher()
   zobrist_previous: int = hasher(board)
   flags: PositionFlag = PositionFlag(0)
+  extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
   # does this game contain errors?
   if game.errors:
     # game goes into errors list
@@ -259,74 +286,76 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
       raise InvalidGameError(f'Invalid position ({board_status!r}) at {san} with {board.fen()!r}')
     # yield useful move/position info
     zobrist_current: int = hasher(board)
+    flags, extras = _CreatePositionFlags(board, san, flags, extras)
     yield (n_ply + 1, san, EncodePly(move),
            (pawnzobrist.Zobrist(zobrist_previous), pawnzobrist.Zobrist(zobrist_current)),
-           board, _CreatePositionFlags(board, san, flags))
+           board, flags, extras)
     zobrist_previous = zobrist_current
 
 
-def _CreatePositionFlags(board: chess.Board, san: str, old_flags: PositionFlag) -> PositionFlag:
+def _CreatePositionFlags(
+    board: chess.Board,
+    san: str,
+    old_flags: PositionFlag,
+    old_extra: ExtraInsightPositionFlag) -> tuple[PositionFlag, ExtraInsightPositionFlag]:
   """Creates position flags for a given position and also if game should mandatorily end."""
   # create as the move
   flags: PositionFlag = PositionFlag.WHITE_TO_MOVE if board.turn else PositionFlag.BLACK_TO_MOVE
+  extra = ExtraInsightPositionFlag(0)
   # add stuff from previous moves
-  if PositionFlag.WHITE_WIN in old_flags or PositionFlag.BLACK_WIN in old_flags:
-    raise InvalidGameError(f'Continued game after checkmate, ({old_flags!r}) at {san} with {board.fen()!r}')
-  if (PositionFlag.DRAWN_GAME in old_flags or
-      PositionFlag.GAME_CONTINUED_AFTER_MANDATORY_DRAW in old_flags):
-    flags |= PositionFlag.GAME_CONTINUED_AFTER_MANDATORY_DRAW
+  if PositionFlag.CHECKMATE in old_flags:
+    raise InvalidGameError(
+        f'Continued game after checkmate, {old_flags!r} / {old_extra!r} at '
+        f'{san} with {board.fen()!r}')
+  if (ExtraInsightPositionFlag.GAME_CONTINUED_AFTER_MANDATORY_DRAW in old_extra or
+      DRAWN_GAME_EXTRA(old_flags, old_extra)):
+    extra |= ExtraInsightPositionFlag.GAME_CONTINUED_AFTER_MANDATORY_DRAW
   # add the "is_*()" method calls
   position_checks: list[tuple[Callable[[], bool], PositionFlag]] = [
       (board.is_check, PositionFlag.CHECK),
       (board.is_checkmate, PositionFlag.CHECKMATE),
       (board.is_stalemate, PositionFlag.STALEMATE),
-      (board.is_repetition, PositionFlag.REPETITIONS_3),
-      (board.is_fivefold_repetition, PositionFlag.REPETITIONS_5),
-      (board.is_fifty_moves, PositionFlag.MOVES_50),
-      (board.is_seventyfive_moves, PositionFlag.MOVES_75),
   ]
   for method, flag in position_checks:
     if method():
       flags |= flag
+  extra_checks: list[tuple[Callable[[], bool], ExtraInsightPositionFlag]] = [
+      (board.is_repetition, ExtraInsightPositionFlag.REPETITIONS_3),
+      (board.is_fivefold_repetition, ExtraInsightPositionFlag.REPETITIONS_5),
+      (board.is_fifty_moves, ExtraInsightPositionFlag.MOVES_50),
+      (board.is_seventyfive_moves, ExtraInsightPositionFlag.MOVES_75),
+  ]
+  for method, flag in extra_checks:
+    if method():
+      extra |= flag
   # check material
   for color, material_flag in {
       chess.WHITE: PositionFlag.WHITE_INSUFFICIENT_MATERIAL,
       chess.BLACK: PositionFlag.BLACK_INSUFFICIENT_MATERIAL}.items():
     if board.has_insufficient_material(color):
       flags |= material_flag
-  # add mandatory winning conditions
-  if PositionFlag.CHECKMATE in flags and PositionFlag.BLACK_TO_MOVE in flags:
-    flags |= PositionFlag.WHITE_WIN
-  if PositionFlag.CHECKMATE in flags and PositionFlag.WHITE_TO_MOVE in flags:
-    flags |= PositionFlag.BLACK_WIN
-  # add mandatory draw positions
-  if (PositionFlag.STALEMATE in flags or
-      (PositionFlag.WHITE_INSUFFICIENT_MATERIAL in flags and
-       PositionFlag.BLACK_INSUFFICIENT_MATERIAL in flags) or
-      PositionFlag.REPETITIONS_5 in flags or
-      PositionFlag.MOVES_75 in flags):
-    flags |= PositionFlag.DRAWN_GAME
     # check that it is not also a win position!
-    if PositionFlag.BLACK_WIN in flags or PositionFlag.WHITE_WIN in flags:
+    if PositionFlag.CHECKMATE in flags:
       raise InvalidGameError(
           f'Position is both a WIN and a DRAW, ({flags!r}) at {san} with {board.fen()!r}')
-  return flags
+  return (flags, extra)
 
 
 def _FixGameResultHeaderOrRaise(
     original_pgn: str, game: chess.pgn.Game, headers: dict[str, str]) -> None:
   """Either fixes the 'result' header, or raises InvalidGameError."""
-  if headers.get('result', '*') in RESULTS_PGN_MAP:
+  if headers.get('result', '*') in RESULTS_PGN:
     return  # all is already OK
   # go over the moves, unfortunately we have to pay the price of going over redundantly
   n_ply: int = 0
   flags: PositionFlag = PositionFlag(0)
+  extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
   result_pgn: str
-  for n_ply, _, _, _, _, flags in IterateGame(game):
+  for n_ply, _, _, _, _, flags, extras in IterateGame(game):
     pass  # we just want to get to last recorded move
   if n_ply:
-    for result_flag, result_pgn in RESULTS_FLAG_MAP.items():
-      if result_flag in flags:
+    for result_pgn, result_flag in RESULTS_PGN.items():
+      if result_flag(flags):
         # we found a game that had a very concrete ending result
         logging.info(
             'Adopting forced result: %s -> %s (%r)', headers.get('result', '*'),
@@ -335,7 +364,7 @@ def _FixGameResultHeaderOrRaise(
         return
   # as last resource we look into actual PGN to see if it has some recorded result at end
   result_pgn = original_pgn.split('\n')[-1].strip()
-  if result_pgn and result_pgn in RESULTS_PGN_MAP:
+  if result_pgn and result_pgn in RESULTS_PGN:
     # found one
     logging.info(
         'Adopting PGN last-line result: %s -> %s (%r)', headers.get('result', '*'),
@@ -369,7 +398,7 @@ def _HeaderCompare(
   # first look at 'result': if it is different then games are not the same most probably
   result_a: str = ha.get('result', '*')
   result_b: str = hb.get('result', '*')
-  if result_a not in RESULTS_PGN_MAP or result_b not in RESULTS_PGN_MAP:
+  if result_a not in RESULTS_PGN or result_b not in RESULTS_PGN:
     raise ValueError(f'Invalid result/game {ha!r} / {hb!r}')
   if result_a != result_b:
     return (False, None)
@@ -462,15 +491,14 @@ class PGNData:
       # test for games we don't know the result of
       _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
       # go over the moves
-      for n_ply, san, encoded_ply, (z_previous, z_current), board, flags in IterateGame(game):
+      for n_ply, san, encoded_ply, (z_previous, z_current), board, flags, extras in IterateGame(game):
         # add to dictionary, if needed
         if encoded_ply not in dict_pointer:
           # add the position
           new_count += 1
-          dict_pointer[encoded_ply] = GamePosition(plys={}, flags=flags, games=None)
+          dict_pointer[encoded_ply] = GamePosition(plys={}, flags=flags, engine=None, games=None)
           # check for unexpected game endings
-          if ((PositionFlag.WHITE_WIN in flags or PositionFlag.BLACK_WIN in flags) and
-              game_headers['result'] == '1/2-1/2'):
+          if (PositionFlag.CHECKMATE in flags and game_headers['result'] == '1/2-1/2'):
             # TODO: if the last move is literally the checkmate, then we can correct the result too
             raise InvalidGameError(
                 f'Draw result 1/2-1/2 should be {flags} at {n_ply}/{san} with {board.fen()!r}')
@@ -539,6 +567,7 @@ class PGNDataSQLite:
     CREATE TABLE IF NOT EXISTS positions (
         position_hash INTEGER PRIMARY KEY,  -- 128 bit Zobrist
         flags INTEGER NOT NULL,             -- PositionFlag integer
+        extras TEXT NOT NULL,               -- ExtraInsightPositionFlag ','-separated hex set
         game_headers TEXT                   -- JSON array of game headers or NULL
     );
     """
@@ -610,21 +639,26 @@ class PGNDataSQLite:
     self.DeleteDBFile()
 
   def InsertPosition(
-      self, position_hash: pawnzobrist.Zobrist, flags: PositionFlag,
+      self, position_hash: pawnzobrist.Zobrist,
+      flags: PositionFlag, extras: ExtraInsightPositionFlag,
       game_headers: Optional[list[dict[str, str]]]) -> None:
     """Insert a position, or update if existing by adding game headers."""
     cur: sqlite3.Cursor = self._conn.cursor()
     # check if position_hash exists
     cur.execute(
-        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash.z,))
+        'SELECT flags, extras, game_headers FROM positions WHERE position_hash = ?;',
+        (position_hash.z,))
     row = cur.fetchone()
     if row:
       # we already have this position, so we check if flags are consistent and add headers, if any
-      existing_flags, existing_json = row
+      existing_flags, existing_extras, existing_json = row
       if existing_flags != flags:
         raise ValueError(
-            f'Conflicting flags for position 0x{position_hash}: '
+            f'Conflicting flags for position {position_hash}: '
             f'{existing_flags} (old) versus {flags} (new)')
+      # add extra flags
+      existing_extras = set(existing_extras.split(','))
+      existing_extras.add(hex(extras.value))
       # look at headers, if needed
       if game_headers:
         # merge any new game headers
@@ -635,33 +669,36 @@ class PGNDataSQLite:
       # save
       cur.execute("""
           UPDATE positions
-          SET flags = ?, game_headers = ?
+          SET flags = ?, extras = ?, game_headers = ?
           WHERE position_hash = ?
-      """, (flags, updated_headers, position_hash.z))
+      """, (flags, ','.join(sorted(existing_extras)), updated_headers, position_hash.z))
     else:
       # brand new entry
       headers_json: Optional[str] = json.dumps(game_headers) if game_headers else None
       cur.execute("""
-          INSERT INTO positions (position_hash, flags, game_headers)
-          VALUES (?, ?, ?)
-      """, (position_hash,z, flags.value, headers_json))
+          INSERT INTO positions (position_hash, flags, extras, game_headers)
+          VALUES (?, ?, ?, ?)
+      """, (position_hash.z, flags.value, hex(extras.value), headers_json))
     self._conn.commit()
 
   def GetPosition(
       self, position_hash: pawnzobrist.Zobrist) -> tuple[
-          Optional[PositionFlag], Optional[list[dict[str, str]]]]:
+          Optional[PositionFlag], Optional[set[ExtraInsightPositionFlag]],
+          Optional[list[dict[str, str]]]]:
     """Retrieve the PositionFlag for the given hash. Returns None if not found."""
     cursor: sqlite3.Cursor = self._conn.cursor()
     cursor.execute(
-        'SELECT flags, game_headers FROM positions WHERE position_hash = ?;', (position_hash.z,))
+        'SELECT flags, extras, game_headers FROM positions WHERE position_hash = ?;', (position_hash.z,))
     row = cursor.fetchone()
     if row is None:
-      return (None, None)
+      return (None, None, None)
     flag = PositionFlag(row[0])
-    if row[1] is None:
-      return (flag, None)
+    extras: set[ExtraInsightPositionFlag] = set(
+        ExtraInsightPositionFlag(int(e, 16)) for e in row[1].split(','))
+    if row[2] is None:
+      return (flag, extras, None)
     headers: Optional[list[dict[str, str]]] = json.loads(existing_json)
-    return (flag, headers if headers else None)
+    return (flag, extras, headers if headers else None)
 
   def InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
@@ -700,8 +737,9 @@ class PGNDataSQLite:
     return [(i, ErrorGameCategory(c), p, e) for i, c, p, e in cursor.fetchall()]
 
 
+# TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
 def FindBestMove(
-    fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, int]:
+    fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, int, int]:
   """Finds the best move for a position (FEN) up to a depth.
 
   Args:
@@ -710,10 +748,11 @@ def FindBestMove(
     engine_path: (default 'stockfish') the engine path to invoke
 
   Returns:
-    (best_move, mate_in_n), where best_move is a chess.Move and mate_in_n can be:
-        0 = no forced mate found
-        +N (positive) = side to move mates in N
-        -N (negative) = opponent side mates in abs(N)
+    (best_move, score, mate_in_n), where best_move is a chess.Move, score is in centi-pawns,
+        and mate_in_n can be:
+          0 = no forced mate found
+          +N (positive) = side to move mates in N
+          -N (negative) = opponent side mates in abs(N)
   """
   # open Stockfish in UCI mode
   with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
@@ -735,4 +774,5 @@ def FindBestMove(
       # mate_in > 0 => side to move is mating in n_mate moves
       # mate_in < 0 => the opponent is mating in abs(n_mate) moves
       mate_in = n_mate
-    return (best_move, mate_in)
+    score: Optional[int] = relative_score.score()
+    return (best_move, 0 if score is None else score, mate_in)
