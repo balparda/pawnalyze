@@ -174,10 +174,13 @@ CAN_CLAIM_DRAW: Callable[[ExtraInsightPositionFlag], bool] = lambda f: (
     ExtraInsightPositionFlag.REPETITIONS_3 in f or ExtraInsightPositionFlag.MOVES_50 in f)
 
 # game results PGN code, and the checking helper
-RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
-    '1-0': WHITE_WIN,
-    '0-1': BLACK_WIN,
-    '1/2-1/2': DRAWN_GAME,
+_WHITE_WIN_PGN: str = '1-0'
+_BLACK_WIN_PGN: str = '0-1'
+_DRAW_PGN: str = '1/2-1/2'
+_RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
+    _WHITE_WIN_PGN: WHITE_WIN,
+    _BLACK_WIN_PGN: BLACK_WIN,
+    _DRAW_PGN: DRAWN_GAME,
 }
 
 
@@ -354,7 +357,7 @@ def _CreatePositionFlags(
 def _FixGameResultHeaderOrRaise(
     original_pgn: str, game: chess.pgn.Game, headers: dict[str, str]) -> None:
   """Either fixes the 'result' header, or raises InvalidGameError."""
-  if headers.get('result', '*') in RESULTS_PGN:
+  if headers.get('result', '*') in _RESULTS_PGN:
     return  # all is already OK
   # go over the moves, unfortunately we have to pay the price of going over redundantly
   n_ply: int = 0
@@ -364,8 +367,8 @@ def _FixGameResultHeaderOrRaise(
   for n_ply, _, _, _, _, flags, extras in IterateGame(game):
     pass  # we just want to get to last recorded move
   if n_ply:
-    for result_pgn, result_flag in RESULTS_PGN.items():
-      if result_flag(flags):
+    for result_pgn, result_flag in _RESULTS_PGN.items():
+      if result_flag(flags) or result_pgn == _DRAW_PGN and DRAWN_GAME_EXTRA(flags, extras):
         # we found a game that had a very concrete ending result
         logging.info(
             'Adopting forced result: %s -> %s (%r)', headers.get('result', '*'),
@@ -374,7 +377,7 @@ def _FixGameResultHeaderOrRaise(
         return
   # as last resource we look into actual PGN to see if it has some recorded result at end
   result_pgn = original_pgn.split('\n')[-1].strip()
-  if result_pgn and result_pgn in RESULTS_PGN:
+  if result_pgn and result_pgn in _RESULTS_PGN:
     # found one
     logging.info(
         'Adopting PGN last-line result: %s -> %s (%r)', headers.get('result', '*'),
@@ -408,7 +411,7 @@ def _HeaderCompare(
   # first look at 'result': if it is different then games are not the same most probably
   result_a: str = ha.get('result', '*')
   result_b: str = hb.get('result', '*')
-  if result_a not in RESULTS_PGN or result_b not in RESULTS_PGN:
+  if result_a not in _RESULTS_PGN or result_b not in _RESULTS_PGN:
     raise ValueError(f'Invalid result/game {ha!r} / {hb!r}')
   if result_a != result_b:
     return (False, None)
@@ -487,8 +490,10 @@ class PGNData:
   def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[int, int]:
     """Loads game into database. Returns (plys, new_positions)."""
     n_ply: int = 0
+    n_ply_checkmate: tuple[int, str] = (0, '')
     new_count: int = 0
     board: Optional[chess.Board] = None
+    flags: PositionFlag = PositionFlag(0)
     try:
       # prepare to add to dict structure by going over the moves
       dict_pointer: dict[int, GamePosition] = self.db.positions
@@ -497,17 +502,15 @@ class PGNData:
       # test for games we don't know the result of
       _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
       # go over the moves
-      for n_ply, san, encoded_ply, (z_previous, z_current), board, flags, extras in IterateGame(game):
+      for n_ply, san, encoded_ply, (z_previous, z_current), board, flags, _ in IterateGame(game):
         # add to dictionary, if needed
         if encoded_ply not in dict_pointer:
           # add the position
           new_count += 1
           dict_pointer[encoded_ply] = GamePosition(plys={}, flags=flags, engine=None, games=None)
           # check for unexpected game endings
-          if (PositionFlag.CHECKMATE in flags and game_headers['result'] == '1/2-1/2'):
-            # TODO: if the last move is literally the checkmate, then we can correct the result too
-            raise InvalidGameError(
-                f'Draw result 1/2-1/2 should be {flags} at {n_ply}/{san} with {board.fen()!r}')
+          if (PositionFlag.CHECKMATE in flags and game_headers['result'] == _DRAW_PGN):
+            n_ply_checkmate = (n_ply, san)  # we save this to check later is this is the last move...
         # move the pointer
         position = dict_pointer[encoded_ply]
         dict_pointer = position.plys
@@ -515,6 +518,15 @@ class PGNData:
       if board is None:
         # game had no moves, we will consider this an "error" game
         raise EmptyGameError()
+      # check for case of games marked draw that are actually checkmate
+      if n_ply_checkmate[0]:
+        if n_ply > n_ply_checkmate[0]:
+          # in this case the game continued *after* checkmate, so we raise
+          raise InvalidGameError(
+              f'Draw result 1/2-1/2 should be checkmate at {n_ply_checkmate[0]}/{n_ply_checkmate[1]}')
+        # if we got here: game is checkmated but marked as draw in error
+        game_headers['result'] = _WHITE_WIN_PGN if WHITE_WIN(flags) else _BLACK_WIN_PGN
+        logging.warning('Fixing game ending draw->%s for %r', game_headers['result'], game_headers)
       # we have a valid game, so we must add the game here
       if position.games is None:
         position.games = []
