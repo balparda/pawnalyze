@@ -159,11 +159,19 @@ As our analysis grows, we must ensure the system can scale and handle the data v
 ### Dependencies
 
 ```sh
-pip install python-chess # pandas numpy
-$ python3 -m pip install python-chess
+[sudo] pip3 install python-chess litecli # pandas numpy
+$ python3 -m pip install python-chess litecli
 ```
 
 https://python-chess.readthedocs.io/en/latest/
+
+Use `litecli [file]` to inspect your DB. Examples:
+
+```sql
+.tables
+SELECT * FROM positions LIMIT 5;
+.schema positions
+```
 
 ### Running the Parser
 

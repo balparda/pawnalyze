@@ -8,6 +8,7 @@
 from typing import Callable
 
 import chess
+import chess.pgn
 import chess.polyglot
 
 from baselib import base
@@ -25,18 +26,20 @@ class Zobrist:
   MakeHasher: Callable[[], Callable[[chess.Board], int]] = lambda: (
       chess.polyglot.ZobristHasher(_PAWNALYZE_ZOBRIST_RANDOM_ARRAY))
 
-  def __init__(self, z: int) -> None:
+  def __init__(self, h: int) -> None:
     """Constructor."""
-    self.z: int = z
+    self.hash: int = h
 
   def __str__(self) -> str:
-    return f'{self.z:032x}'
+    return f'{self.hash:032x}'
 
 
 ZobristFromHash: Callable[[str], Zobrist] = lambda h: Zobrist(int(h, 16))
 
-
 ZobristFromBoard: Callable[[chess.Board], Zobrist] = lambda b: Zobrist(Zobrist.MakeHasher()(b))
+
+
+####################################################################################################
 
 
 def ZobristGenerateTable() -> None:

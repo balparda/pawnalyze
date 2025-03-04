@@ -109,21 +109,23 @@ def Main() -> None:
     # creates objects
     pgn_cache: Optional[pawnlib.PGNCache] = None if ignore_cache else pawnlib.PGNCache()
     database: Optional[pawnlib.PGNData] = None if db_readonly else pawnlib.PGNData()
-    # execute the source reads
-    print()
-    with base.Timer() as op_timer:
-      if url:
-        _LoadFromURL(url, pgn_cache, database, maxload, maxprint)
-        if database:
-          database.Save()
-      elif sources:
-        raise NotImplementedError()
-      else:
-        raise NotImplementedError('No sources found')
-    print()
-    print(f'Executed in {base.TERM_GREEN}{base.HumanizedSeconds(op_timer.delta)}{base.TERM_END}')
-    print()
-    success_message = f'{base.TERM_GREEN}success'
+    try:
+      # execute the source reads
+      print()
+      with base.Timer() as op_timer:
+        if url:
+          _LoadFromURL(url, pgn_cache, database, maxload, maxprint)
+        elif sources:
+          raise NotImplementedError()
+        else:
+          raise NotImplementedError('No sources found')
+      print()
+      print(f'Executed in {base.TERM_GREEN}{base.HumanizedSeconds(op_timer.delta)}{base.TERM_END}')
+      print()
+      success_message = f'{base.TERM_GREEN}success'
+    finally:
+      if database:
+        database.Close()
   except Exception as err:
     success_message = f'{base.TERM_FAIL}error: {err}'
     raise
