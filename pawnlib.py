@@ -41,6 +41,26 @@ _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 # useful
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
 STANDARD_CHESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+_EMPTY_HEADER_VALUES: set[str] = {
+    '?', '??', '???', '????',
+    'x', 'xx', 'xxx', 'xxxx',
+    '-', '--', '---', '----',
+    '*', '**', '***', '****',
+    '#', '##', '###', '####',
+    '.', '..', '...', '....',
+    '????.??.??', 'xxxx.xx.xx', '####.##.##',
+    '????.??', 'xxxx.xx', '####.##',
+    'n/a', 'unknown', 'none', 'no',
+    'no date', 'no name', 'no event',
+}
+
+# make player names "Balparda, Daniel" -> "daniel balparda"
+_NormalizeNames: Callable[[str], str] = lambda n: (
+    ' '.join(n.lower().split(', ', 1)[::-1]) if ', ' in n else n.lower())
+
+# convert a chess.Move into an integer we can use to index our dictionaries
+EncodePly: Callable[[chess.Move], int] = lambda m: (
+    m.from_square * 100 + m.to_square + (m.promotion * 1000000 if m.promotion else 0))
 
 
 class Error(Exception):
@@ -59,14 +79,115 @@ class NonStandardGameError(InvalidGameError):
   """Game is invalid because is it not standard chess exception."""
 
 
+class ErrorGameCategory(enum.Flag):
+  """Game error categories in DB."""
+  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
+  # you will corrupt the database!! DO NOT REORDER LIST!
+  # Was using enum.auto() but hardcoded values to help avoid data corruption.
+  EMPTY_GAME = 1 << 0          # game with no moves
+  NON_STANDARD_CHESS = 1 << 1  # chess960 or handicap or incomplete game or any non-standard
+  LIBRARY_ERROR = 1 << 2       # error reported by loading library
+  INVALID_POSITION = 1 << 3    # invalid position found
+  INVALID_MOVE = 1 << 4        # invalid move found
+  ENDING_ERROR = 1 << 5        # game ending has some problem
+
+
+class PositionFlag(enum.Flag):
+  """States a position might be in. Must be position (Zobrist) agnostic."""
+  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
+  # you will corrupt the database!! DO NOT REORDER LIST!
+  # Was using enum.auto() but hardcoded values to help avoid data corruption.
+  # The conditions below are mandatory (by the rules) and depend only on the
+  # Zobrist hash, which encodes: [BOARD, TURN, CASTLING RIGHTS, EN PASSANT SQUARES]
+  WHITE_TO_MOVE = 1 << 0  # white moves in this position
+  BLACK_TO_MOVE = 1 << 1  # black moves in this position
+  CHECK = 1 << 2      # is the current side to move in check
+  CHECKMATE = 1 << 3  # is the current position checkmate
+  STALEMATE = 1 << 4  # is the current position stalemate
+  WHITE_INSUFFICIENT_MATERIAL = 1 << 5   # white does not have sufficient winning material
+  BLACK_INSUFFICIENT_MATERIAL = 1 << 6  # black does not have sufficient winning material
+  # <<== add new stuff to the end!
+
+
+class ExtraInsightPositionFlag(enum.Flag):
+  """States a position might be in that are not necessarily Zobrist Agnostic."""
+  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
+  # you will corrupt the database!! DO NOT REORDER LIST!
+  # ATTENTION: checking for repetitions is costly for the chess library!
+  # repeated game position counters
+  REPETITIONS_3 = 1 << 10  # one side can claim draw (3x repetition rule)
+  REPETITIONS_5 = 1 << 11  # since 2014-7-1 this game is automatically drawn (5x repetition rule)
+  # halfmoves that have elapsed without a capture or pawn move counters
+  MOVES_50 = 1 << 12       # one side can claim draw (50 moves rule)
+  MOVES_75 = 1 << 13       # since 2014-7-1 this game is automatically drawn (75 moves rule)
+  GAME_CONTINUED_AFTER_MANDATORY_DRAW = 1 << 14  # position *after* game should have drawn
+  # <<== add new stuff to the end!
+
+
 @dataclasses.dataclass
-class _Cache:
-  """A cache mapping to be saved to disk."""
-  files: dict[str, str]  # {URL(lowercase): file_path}
+class EngineResult:
+  """Analysis engine result."""
+  ply: int             # the best found continuation
+  score: int           # if present (not mate): the score in centi-pawns
+  mate: Optional[int]  # if present: > 0 => side to move is mating in 'mate' moves; < 0 => opponent is mating in abs(mate) moves
+
+
+@dataclasses.dataclass
+class GamePosition:
+  """Game position."""
+  plys: dict[int, Any]                   # the next found continuations {ply: GamePosition}
+  flags: PositionFlag                    # the status of this position
+  engine: Optional[EngineResult]         # if given, the result of the engine computation
+  games: Optional[list[dict[str, str]]]  # list of PGN headers that end in this position
+
+
+@dataclasses.dataclass
+class ErrorGame:
+  """A game that failed checks."""
+  pgn: str    # the whole PGN for the game
+  error: str  # error given by chess module
+
+
+@dataclasses.dataclass
+class LoadedGames:
+  """Loaded games structure to be saved to disk."""
+  positions: dict[int, GamePosition]   # the initial plys as {ply: GamePosition}
+  empty_games: list[ErrorGame]         # the games that have errors and cannot be used
+  non_standard_games: list[ErrorGame]  # the games that have errors and cannot be used
+  error_games: list[ErrorGame]         # the games that have errors and cannot be used
+
+
+# PositionFlag helpers, only depend on the Zobrist hash
+WHITE_WIN: Callable[[PositionFlag], bool] = lambda f: (
+    PositionFlag.CHECKMATE in f and PositionFlag.BLACK_TO_MOVE in f)
+BLACK_WIN: Callable[[PositionFlag], bool] = lambda f: (
+    PositionFlag.CHECKMATE in f and PositionFlag.WHITE_TO_MOVE in f)
+DRAWN_GAME: Callable[[PositionFlag], bool] = lambda f: (
+    PositionFlag.STALEMATE in f or (PositionFlag.WHITE_INSUFFICIENT_MATERIAL in f and
+                                    PositionFlag.BLACK_INSUFFICIENT_MATERIAL in f))
+
+# ExtraInsightPositionFlag helpers, depend on game history and not only on Zobrist hash
+DRAWN_GAME_EXTRA: Callable[[PositionFlag, ExtraInsightPositionFlag], bool] = lambda p, e: (
+    DRAWN_GAME(p) or
+    ExtraInsightPositionFlag.REPETITIONS_5 in e or ExtraInsightPositionFlag.MOVES_75 in e)
+CAN_CLAIM_DRAW: Callable[[ExtraInsightPositionFlag], bool] = lambda f: (
+    ExtraInsightPositionFlag.REPETITIONS_3 in f or ExtraInsightPositionFlag.MOVES_50 in f)
+
+# game results PGN code, and the checking helper
+RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
+    '1-0': WHITE_WIN,
+    '0-1': BLACK_WIN,
+    '1/2-1/2': DRAWN_GAME,
+}
 
 
 class PGNCache:
   """PGN cache."""
+
+  @dataclasses.dataclass
+  class _Cache:
+    """A cache mapping to be saved to disk."""
+    files: dict[str, str]  # {URL(lowercase): file_path}
 
   def __init__(self) -> None:
     """Constructor."""
@@ -75,7 +196,7 @@ class PGNCache:
       os.makedirs(_PGN_CACHE_DIR)
       logging.info('Created empty PGN cache dir %r', _PGN_CACHE_DIR)
     # load cache file, create if empty
-    self._cache: _Cache = _Cache(files={})
+    self._cache: PGNCache._Cache = PGNCache._Cache(files={})
     if os.path.exists(_PGN_CACHE_FILE):
       self._cache = base.BinDeSerialize(file_path=_PGN_CACHE_FILE)
       logging.info('Loaded cache from %r with %d entries', _PGN_CACHE_FILE, len(self._cache.files))
@@ -103,112 +224,6 @@ class PGNCache:
     return file_path
 
 
-@dataclasses.dataclass
-class ErrorGame:
-  """A game that failed checks."""
-  pgn: str    # the whole PGN for the game
-  error: str  # error given by chess module
-
-
-class PositionFlag(enum.Flag):
-  """States a position might be in. Must be position (Zobrist) agnostic."""
-  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
-  # you will corrupt the database!! DO NOT REORDER LIST!
-  # Was using enum.auto() but hardcoded values to help avoid data corruption.
-  # The conditions below are mandatory (by the rules) and depend only on the
-  # Zobrist hash, which encodes: [BOARD, TURN, CASTLING RIGHTS, EN PASSANT SQUARES]
-  WHITE_TO_MOVE = 1 << 0  # white moves in this position
-  BLACK_TO_MOVE = 1 << 1  # black moves in this position
-  CHECK = 1 << 2      # is the current side to move in check
-  CHECKMATE = 1 << 3  # is the current position checkmate
-  STALEMATE = 1 << 4  # is the current position stalemate
-  WHITE_INSUFFICIENT_MATERIAL = 1 << 5   # white does not have sufficient winning material
-  BLACK_INSUFFICIENT_MATERIAL = 1 << 6  # black does not have sufficient winning material
-  # <<== add new stuff to the end!
-
-
-WHITE_WIN: Callable[[PositionFlag], bool] = lambda f: (
-    PositionFlag.CHECKMATE in f and PositionFlag.BLACK_TO_MOVE in f)
-BLACK_WIN: Callable[[PositionFlag], bool] = lambda f: (
-    PositionFlag.CHECKMATE in f and PositionFlag.WHITE_TO_MOVE in f)
-DRAWN_GAME: Callable[[PositionFlag], bool] = lambda f: (
-    PositionFlag.STALEMATE in f or (PositionFlag.WHITE_INSUFFICIENT_MATERIAL in f and
-                                    PositionFlag.BLACK_INSUFFICIENT_MATERIAL in f))
-
-
-class ExtraInsightPositionFlag(enum.Flag):
-  """States a position might be in that are not necessarily Zobrist Agnostic."""
-  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
-  # you will corrupt the database!! DO NOT REORDER LIST!
-  # ATTENTION: checking for repetitions is costly for the chess library!
-  # repeated game position counters
-  REPETITIONS_3 = 1 << 10  # one side can claim draw (3x repetition rule)
-  REPETITIONS_5 = 1 << 11  # since 2014-7-1 this game is automatically drawn (5x repetition rule)
-  # halfmoves that have elapsed without a capture or pawn move counters
-  MOVES_50 = 1 << 12       # one side can claim draw (50 moves rule)
-  MOVES_75 = 1 << 13       # since 2014-7-1 this game is automatically drawn (75 moves rule)
-  GAME_CONTINUED_AFTER_MANDATORY_DRAW = 1 << 14  # position *after* game should have drawn
-  # <<== add new stuff to the end!
-
-
-DRAWN_GAME_EXTRA: Callable[[PositionFlag, ExtraInsightPositionFlag], bool] = lambda p, e: (
-    DRAWN_GAME(p) or
-    ExtraInsightPositionFlag.REPETITIONS_5 in e or ExtraInsightPositionFlag.MOVES_75 in e)
-CAN_CLAIM_DRAW: Callable[[ExtraInsightPositionFlag], bool] = lambda f: (
-    ExtraInsightPositionFlag.REPETITIONS_3 in f or ExtraInsightPositionFlag.MOVES_50 in f)
-
-
-RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
-    '1-0': WHITE_WIN,
-    '0-1': BLACK_WIN,
-    '1/2-1/2': DRAWN_GAME,
-}
-
-
-@dataclasses.dataclass
-class EngineResult:
-  """Analysis engine result."""
-  ply: int             # the best found continuation
-  score: int           # if present (not mate): the score in centi-pawns
-  mate: Optional[int]  # if present: > 0 => side to move is mating in 'mate' moves; < 0 => opponent is mating in abs(mate) moves
-
-
-@dataclasses.dataclass
-class GamePosition:
-  """Game position."""
-  plys: dict[int, Any]                   # the next found continuations {ply: GamePosition}
-  flags: PositionFlag                    # the status of this position
-  engine: Optional[EngineResult]         # if given, the result of the engine computation
-  games: Optional[list[dict[str, str]]]  # list of PGN headers that end in this position
-
-
-_EMPTY_POSITION: GamePosition = GamePosition(
-    plys={}, flags=PositionFlag(0), engine=None, games=None)
-
-
-@dataclasses.dataclass
-class LoadedGames:
-  """Loaded games structure to be saved to disk."""
-  positions: dict[int, GamePosition]   # the initial plys as {ply: GamePosition}
-  empty_games: list[ErrorGame]         # the games that have errors and cannot be used
-  non_standard_games: list[ErrorGame]  # the games that have errors and cannot be used
-  error_games: list[ErrorGame]         # the games that have errors and cannot be used
-
-
-_EMPTY_HEADER_VALUES: set[str] = {
-    '?', '??', '???', '????',
-    'x', 'xx', 'xxx', 'xxxx',
-    '-', '--', '---', '----',
-    '*', '**', '***', '****',
-    '#', '##', '###', '####',
-    '.', '..', '...', '....',
-    '????.??.??', 'xxxx.xx.xx', '####.##.##',
-    '????.??', 'xxxx.xx', '####.##',
-    'n/a', 'unknown', 'none', 'no',
-    'no date', 'no name', 'no event',
-}
-
-
 def _GameMinimalHeaders(game: chess.pgn.Game) -> dict[str, str]:
   """Return a dict with only parsed/relevant content."""
   headers: dict[str, str] = {}
@@ -222,11 +237,6 @@ def _GameMinimalHeaders(game: chess.pgn.Game) -> dict[str, str]:
       continue  # skip any empty or default value
     headers[k.lower()] = v
   return headers
-
-
-# convert a chess.Move into an integer we can use to index our dictionaries
-EncodePly: Callable[[chess.Move], int] = lambda m: (
-    m.from_square * 100 + m.to_square + (m.promotion * 1000000 if m.promotion else 0))
 
 
 def DecodePly(ply: int) -> chess.Move:
@@ -424,10 +434,6 @@ def _HeaderCompare(
   return (True, _HeaderMerge(ha, hb))
 
 
-_NormalizeNames: Callable[[str], str] = lambda n: (
-    ' '.join(n.lower().split(', ', 1)[::-1]) if ', ' in n else n.lower())
-
-
 def _HeaderMerge(ha: dict[str, str], hb: dict[str, str]) -> dict[str, str]:
   """Merge 2 headers avoiding losses."""
   # TODO: rewrite... this is bad
@@ -486,7 +492,7 @@ class PGNData:
     try:
       # prepare to add to dict structure by going over the moves
       dict_pointer: dict[int, GamePosition] = self.db.positions
-      position: GamePosition = _EMPTY_POSITION
+      position: GamePosition = GamePosition(plys={}, flags=PositionFlag(0), engine=None, games=None)
       game_headers: dict[str, str] = _GameMinimalHeaders(game)
       # test for games we don't know the result of
       _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
@@ -545,19 +551,6 @@ class PGNData:
   # TODO: add a method for trimming the tree of nodes without games
 
   # TODO: add a method for duplicate game in a node detection
-
-
-class ErrorGameCategory(enum.Flag):
-  """Game error categories in DB."""
-  # ATTENTION: DO NOT ADD TO BEGINNING OR MIDDLE OF LIST! ONLY ADD AT THE END or
-  # you will corrupt the database!! DO NOT REORDER LIST!
-  # Was using enum.auto() but hardcoded values to help avoid data corruption.
-  EMPTY_GAME = 1 << 0          # game with no moves
-  NON_STANDARD_CHESS = 1 << 1  # chess960 or handicap or incomplete game or any non-standard
-  LIBRARY_ERROR = 1 << 2       # error reported by loading library
-  INVALID_POSITION = 1 << 3    # invalid position found
-  INVALID_MOVE = 1 << 4        # invalid move found
-  ENDING_ERROR = 1 << 5        # game ending has some problem
 
 
 class PGNDataSQLite:
