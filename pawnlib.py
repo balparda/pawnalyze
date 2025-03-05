@@ -46,6 +46,7 @@ _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
 STANDARD_CHESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 STARTING_POSITION_HASH: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(chess.pgn.Game().board())
+_PRINT_EVERY_N = 1000
 _EMPTY_HEADER_VALUES: set[str] = {
     '?', '??', '???', '????',
     'x', 'xx', 'xxx', 'xxxx',
@@ -500,7 +501,7 @@ class PGNData:
           CREATE TABLE IF NOT EXISTS games (
               game_hash TEXT PRIMARY KEY      CHECK (length(game_hash)         = 64),  -- 256 bit SHA-256 hex
               end_position_hash TEXT NOT NULL CHECK (length(end_position_hash) = 32),  -- 128 bit Zobrist hex
-              game_plys INTEGER NOT NULL,       -- number of plys if success in parsing, 0 for error games
+              game_plys TEXT NOT NULL,          -- list of encoded plys as ','-separated hex list; '-' for error games
               game_headers TEXT NOT NULL,       -- JSON dict with game headers
               error_category INTEGER NOT NULL,  -- if error game: ErrorGameCategory integer (0 == no error)
               error_pgn TEXT,                   -- if error game: original PGN
@@ -640,13 +641,14 @@ class PGNData:
     return (flag, extras, set() if row[2] is None else set(row[2].split(',')))
 
   def _InsertParsedGame(
-      self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: int,
+      self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
       game_headers: dict[str, str]) -> None:
     """Insert a "successful" game in `game_hash` with `position_hash`, `game_plys`, and `game_headers`."""
     self._conn.execute("""
         INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
         VALUES(?, ?, ?, ?, ?)
-    """, (game_hash, str(end_position_hash), game_plys, json.dumps(game_headers), 0))
+    """, (game_hash, str(end_position_hash), ','.join(hex(p)[2:] for p in game_plys),
+          json.dumps(game_headers), 0))
 
   def _InsertErrorGame(
       self, game_hash: str, game_headers: dict[str, str],
@@ -656,11 +658,11 @@ class PGNData:
         INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers,
                                     error_category, error_pgn, error_message)
         VALUES(?, ?, ?, ?, ?, ?, ?)
-    """, (game_hash, str(STARTING_POSITION_HASH), 0, json.dumps(game_headers),
+    """, (game_hash, str(STARTING_POSITION_HASH), '-', json.dumps(game_headers),
           error_category.value, error_pgn, error_message))
 
   def _GetGame(self, game_hash: str) -> Optional[
-      tuple[pawnzobrist.Zobrist, int, dict[str, str],
+      tuple[pawnzobrist.Zobrist, list[int], dict[str, str],
             ErrorGameCategory, Optional[str], Optional[str]]]:
     """Return game (zobrist, plys, header, err_car, err_pgn, err_message) for game_hash; None if not found."""
     cursor: sqlite3.Cursor = self._conn.execute("""
@@ -668,22 +670,25 @@ class PGNData:
         FROM games
         WHERE game_hash = ?;
     """, (game_hash,))
-    row: Optional[tuple[str, int, str, ErrorGameCategory,
+    row: Optional[tuple[str, str, str, ErrorGameCategory,
                         Optional[str], Optional[str]]] = cursor.fetchone()  # primary key == game_hash
     if not row:
       return None
-    return (pawnzobrist.Zobrist(int(row[0], 16)), row[1], json.loads(row[2]),
-            ErrorGameCategory(row[3]), row[4], row[5])
+    return (pawnzobrist.Zobrist(int(row[0], 16)),
+            [] if row[1] == '-' else [int(p, 16) for p in row[1].split(',')],
+            json.loads(row[2]), ErrorGameCategory(row[3]), row[4], row[5])
 
   def _GetAllGames(self) -> Generator[
-      tuple[str, pawnzobrist.Zobrist, int, dict[str, str],
+      tuple[str, pawnzobrist.Zobrist, list[int], dict[str, str],
             ErrorGameCategory, Optional[str], Optional[str]], None, None]:
     """Yields all games as (hash, zobrist, plys, header, err_car, err_pgn, err_message)."""
     cursor: sqlite3.Cursor = self._conn.execute(
         'SELECT game_hash, end_position_hash, game_plys, game_headers, '
         'error_category, error_pgn, error_message FROM games;')
     for h, p, i, d, c, s, m in cursor:  # stream results...
-      yield (h, pawnzobrist.Zobrist(int(p, 16)), i, json.loads(d), ErrorGameCategory(c), s, m)
+      yield (h, pawnzobrist.Zobrist(int(p, 16)),
+             [] if i == '-' else [int(k, 16) for k in i.split(',')],
+             json.loads(d), ErrorGameCategory(c), s, m)
 
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
@@ -709,9 +714,10 @@ class PGNData:
     game_hash: str = base.BytesHexHash(original_pgn.encode(encoding='utf-8', errors='replace'))
     if (done_game := self._GetGame(game_hash)):
       # we already did this game; nothing to do
-      return (game_hash, done_game[1], 0)
+      return (game_hash, len(done_game[1]), 0)
     # we don't have this game, so prepare to parse it
     n_ply: int = 0
+    encoded_plys: list[int] = []
     new_count: int = 0
     board: Optional[chess.Board] = None
     z_current: pawnzobrist.Zobrist = STARTING_POSITION_HASH
@@ -726,6 +732,7 @@ class PGNData:
         # go over the moves
         for n_ply, san, encoded_ply, (z_previous, z_current), board, flags, extras in IterateGame(game):
           # insert position and move
+          encoded_plys.append(encoded_ply)
           new_count += int(self._InsertPosition(z_current, flags, extras))
           self._InsertMove(z_previous, encoded_ply, z_current)
           # check for unexpected game endings
@@ -747,7 +754,7 @@ class PGNData:
           logging.warning('Fixing game ending draw->%s for %r', game_headers['result'], game_headers)
         # we have a valid game, so we must add the game here
         self._InsertPosition(z_current, flags, extras, game_hash=game_hash)
-        self._InsertParsedGame(game_hash, z_current, n_ply, game_headers)
+        self._InsertParsedGame(game_hash, z_current, encoded_plys, game_headers)
         return (game_hash, n_ply, new_count)
     except InvalidGameError as err:
       # some sort of error in game, insert as error game
@@ -795,22 +802,31 @@ class PGNData:
     game_count: int = 0
     ply_count: int = 0
     node_count: int = 0
+    actual_game_count: int = 0
+    actual_loaded_count: int = 0
     processing_start: float = time.time()
+    last_time: float = 0.0
+    logging.info('Downloading local file %r', file_path)
     for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(file_path)):
       # we are building the DB
       game_hash: str
       plys: int
       nodes: int
       game_hash, plys, nodes = self.LoadGame(pgn, game)
+      actual_game_count += 1 if nodes else 0
       ply_count += plys
+      actual_loaded_count += plys if nodes else 0  # assume 0 nodes means we already have that block
       node_count += nodes
-      if not game_count % 10000 and game_count:
-        delta: float = time.time() - processing_start
+      if not game_count % _PRINT_EVERY_N and game_count:
+        now: float = time.time()
+        total_time: float = now - processing_start
+        delta: float = now - last_time
         logging.info(
             'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
-            '(%0.1f games/s average = %s per million games)',
+            '(%0.1f games/s %0.1f plys/s = %s per million games)',
             game_count, ply_count, node_count,
-            (100.0 * (ply_count - node_count) / ply_count) if ply_count else 0,
-            base.HumanizedSeconds(delta), game_count / delta,
-            base.HumanizedSeconds(1000000.0 * delta / game_count))
+            (100.0 * (actual_loaded_count - node_count) / actual_loaded_count) if actual_loaded_count else 0,
+            base.HumanizedSeconds(total_time), _PRINT_EVERY_N / delta, plys / delta,
+            base.HumanizedSeconds(1000000.0 * total_time / actual_game_count) if actual_game_count else '?')
+        last_time = now
       yield (game_count, game_hash, plys, pgn, game)
