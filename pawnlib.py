@@ -8,13 +8,18 @@
 import dataclasses
 import enum
 import hashlib
+import io
 import json
 import logging
 import os
 import os.path
 # import pdb
 import sqlite3
+import tempfile
+import time
 from typing import BinaryIO, Callable, Generator, Optional
+import urllib.request
+import zipfile
 
 import chess
 import chess.engine
@@ -177,6 +182,48 @@ def DecodePly(ply: int) -> chess.Move:
   if not 0 <= from_square < 64 or not 0 <= ply < 64:
     raise ValueError(f'Invalid coordinates: {from_square} / {ply}')
   return chess.Move(from_square, ply, promotion=promotion)
+
+
+def _SplitLargePGN(file_path: str) -> Generator[list[str], None, None]:
+  """A very rough splitting of a huge PGN into individual games."""
+  game_lines: list[str] = []
+  saw_game: bool = False
+  with open(file_path, 'rt', encoding='utf-8', errors='replace') as file_in:
+    count = 0
+    for count, line in enumerate(file_in):
+      # strip the line and skip if empty
+      pgn_line: str = line.strip()
+      if not pgn_line:
+        continue
+      # we have a content line
+      if pgn_line.startswith('['):
+        # we have a header line
+        if game_lines and saw_game:
+          # we have a header+game in the lines, so we output it and restart
+          yield game_lines
+          game_lines, saw_game = [], False
+      else:
+        saw_game = True
+      # add this line to the buffer
+      game_lines.append(pgn_line)
+    # if file didn't end with an empty line, you may have a last game to process:
+    if game_lines:
+      yield game_lines
+    logging.info('Finished parsing %d lines of PGN', count + 1)
+
+
+def _GamesFromLargePGN(file_path: str) -> Generator[tuple[str, chess.pgn.Game], None, None]:
+  """Get individual PGN games and parse them."""
+  for game_lines in _SplitLargePGN(file_path):
+    pgn: str = '\n'.join(game_lines)
+    pgn_io = io.StringIO(pgn)
+    game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
+    if not game:
+      raise ValueError(f'No game found in game lines: {game_lines!r}')
+    other_game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
+    if other_game:
+      raise ValueError(f'Game lines have more than one game: {game_lines!r}')
+    yield (pgn, game)
 
 
 def IterateGame(game: chess.pgn.Game) -> Generator[
@@ -366,6 +413,49 @@ def FindBestMove(
     return (best_move, 0 if score is None else score, mate_in)
 
 
+class PGNCache:
+  """PGN cache."""
+
+  @dataclasses.dataclass
+  class _Cache:
+    """A cache mapping to be saved to disk."""
+    files: dict[str, str]  # {URL(lowercase): file_path}
+
+  def __init__(self) -> None:
+    """Constructor."""
+    # check cache directory is there
+    if not os.path.exists(_PGN_CACHE_DIR):
+      os.makedirs(_PGN_CACHE_DIR)
+      logging.info('Created empty PGN cache dir %r', _PGN_CACHE_DIR)
+    # load cache file, create if empty
+    self._cache: PGNCache._Cache = PGNCache._Cache(files={})
+    if os.path.exists(_PGN_CACHE_FILE):
+      self._cache = base.BinDeSerialize(file_path=_PGN_CACHE_FILE)
+      logging.info('Loaded cache from %r with %d entries', _PGN_CACHE_FILE, len(self._cache.files))
+    else:
+      logging.info('No cache file to load yet')
+
+  def GetCachedPath(self, url: str) -> Optional[str]:
+    """Returns path for cached file, if found in cache. If not returns None."""
+    file_path: Optional[str] = self._cache.files.get(url.lower(), None)
+    if file_path:
+      logging.info('Cache hit for %r -> %r', url, file_path)
+    return file_path
+
+  def AddCachedFile(self, file_url: str, file_obj: BinaryIO) -> str:
+    """Adds open file_obj into cache as being downloaded from file_url. Saves cache."""
+    file_obj.seek(0)
+    hex_hash: str = hashlib.sha256(file_obj.read()).hexdigest().lower()
+    file_obj.seek(0)
+    file_path: str = os.path.join(_PGN_CACHE_DIR, f'{hex_hash}.pgn')
+    with open(file_path, 'wb') as cached_obj:
+      cached_obj.write(file_obj.read())
+    self._cache.files[file_url.lower()] = file_path
+    base.BinSerialize(self._cache, _PGN_CACHE_FILE)
+    logging.info('Added URL %r to cache (%r)', file_url, file_path)
+    return file_path
+
+
 class PGNData:
   """A PGN Database for Pawnalyze using SQLite."""
 
@@ -476,7 +566,7 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute(
         'SELECT flags, extras, game_hashes FROM positions WHERE position_hash = ?;',
         (str(position_hash),))
-    row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()
+    row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()  # primary key == position_hash
     if not row:
       # brand new entry, guaranteed to have only one ExtraInsightPositionFlag & one hash
       self._conn.execute("""
@@ -518,7 +608,7 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute(
         'SELECT flags, extras, game_hashes FROM positions WHERE position_hash = ?;',
         (str(position_hash),))
-    row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()
+    row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()  # primary key == position_hash
     if row is None:
       return None
     flag = PositionFlag(row[0])
@@ -556,7 +646,7 @@ class PGNData:
         WHERE game_hash = ?;
     """, (game_hash,))
     row: Optional[tuple[str, int, str, ErrorGameCategory,
-                        Optional[str], Optional[str]]] = cursor.fetchone()
+                        Optional[str], Optional[str]]] = cursor.fetchone()  # primary key == game_hash
     if not row:
       return None
     return (pawnzobrist.Zobrist(int(row[0], 16)), row[1], json.loads(row[2]),
@@ -569,7 +659,7 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute(
         'SELECT game_hash, end_position_hash, game_plys, game_headers, '
         'error_category, error_pgn, error_message FROM games;')
-    for h, p, i, d, c, s, m in cursor.fetchall():
+    for h, p, i, d, c, s, m in cursor:  # stream results...
       yield (h, pawnzobrist.Zobrist(int(p, 16)), i, json.loads(d), ErrorGameCategory(c), s, m)
 
   def _InsertMove(
@@ -588,15 +678,15 @@ class PGNData:
         FROM moves
         WHERE from_position_hash = ?;
     """, (str(position_hash),))
-    return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]
+    return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
 
-  def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[int, int]:
-    """Loads game into database. Returns (plys, new_positions)."""
+  def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[str, int, int]:
+    """Loads game into database. Returns (game_hash, plys, new_positions)."""
     # get game_hash and check if we already know this exact game PGN
     game_hash: str = base.BytesHexHash(original_pgn.encode(encoding='utf-8', errors='replace'))
     if (done_game := self._GetGame(game_hash)):
       # we already did this game; nothing to do
-      return (done_game[1], 0)
+      return (game_hash, done_game[1], 0)
     # we don't have this game, so prepare to parse it
     n_ply: int = 0
     new_count: int = 0
@@ -635,7 +725,7 @@ class PGNData:
         # we have a valid game, so we must add the game here
         self._InsertPosition(z_current, flags, extras, game_hash=game_hash)
         self._InsertParsedGame(game_hash, z_current, n_ply, game_headers)
-        return (n_ply, new_count)
+        return (game_hash, n_ply, new_count)
     except InvalidGameError as err:
       # some sort of error in game, insert as error game
       with self._conn:
@@ -643,51 +733,54 @@ class PGNData:
       # log if error not exactly empty|non-standard (these are plentiful and not interesting to see)
       if err.category not in {ErrorGameCategory.EMPTY_GAME, ErrorGameCategory.NON_STANDARD_CHESS}:
         logging.warning('%s\n%r', str(err), original_pgn)
-      return (0, 0)
+      return (game_hash, 0, 0)
 
   # TODO: add a method for trimming the tree of nodes without games
 
   # TODO: add a method for duplicate game in a node detection
 
-
-class PGNCache:
-  """PGN cache."""
-
-  @dataclasses.dataclass
-  class _Cache:
-    """A cache mapping to be saved to disk."""
-    files: dict[str, str]  # {URL(lowercase): file_path}
-
-  def __init__(self) -> None:
-    """Constructor."""
-    # check cache directory is there
-    if not os.path.exists(_PGN_CACHE_DIR):
-      os.makedirs(_PGN_CACHE_DIR)
-      logging.info('Created empty PGN cache dir %r', _PGN_CACHE_DIR)
-    # load cache file, create if empty
-    self._cache: PGNCache._Cache = PGNCache._Cache(files={})
-    if os.path.exists(_PGN_CACHE_FILE):
-      self._cache = base.BinDeSerialize(file_path=_PGN_CACHE_FILE)
-      logging.info('Loaded cache from %r with %d entries', _PGN_CACHE_FILE, len(self._cache.files))
-    else:
-      logging.info('No cache file to load yet')
-
-  def GetCachedPath(self, url: str) -> Optional[str]:
-    """Returns path for cached file, if found in cache. If not returns None."""
-    file_path: Optional[str] = self._cache.files.get(url.lower(), None)
-    if file_path:
-      logging.info('Cache hit for %r -> %r', url, file_path)
-    return file_path
-
-  def AddCachedFile(self, file_url: str, file_obj: BinaryIO) -> str:
-    """Adds open file_obj into cache as being downloaded from file_url. Saves cache."""
-    file_obj.seek(0)
-    hex_hash: str = hashlib.sha256(file_obj.read()).hexdigest().lower()
-    file_obj.seek(0)
-    file_path: str = os.path.join(_PGN_CACHE_DIR, f'{hex_hash}.pgn')
-    with open(file_path, 'wb') as cached_obj:
-      cached_obj.write(file_obj.read())
-    self._cache.files[file_url.lower()] = file_path
-    base.BinSerialize(self._cache, _PGN_CACHE_FILE)
-    logging.info('Added URL %r to cache (%r)', file_url, file_path)
-    return file_path
+  def CachedLoadFromURL(self, url: str, cache: Optional[PGNCache]) -> Generator[
+      tuple[int, str, int, str, chess.pgn.Game], None, None]:
+    """Load a source from URL into DB, cached, yields (n, hash, plys, pgn, game)."""
+    pgn_path: Optional[str] = cache.GetCachedPath(url) if cache else None
+    game_count: int = 0
+    ply_count: int = 0
+    node_count: int = 0
+    with tempfile.NamedTemporaryFile() as out_file:
+      if pgn_path is None:
+        # we don't have the PGN yet: open the URL, download file
+        logging.info('Downloading URL %r', url)
+        with urllib.request.urlopen(url) as response, tempfile.NamedTemporaryFile() as raw_file:
+          raw_file.write(response.read())
+          raw_file.seek(0)
+          # open the temporary file as a ZIP archive
+          logging.info('Unzipping file')
+          with zipfile.ZipFile(raw_file, 'r') as zip_ref:
+            # for simplicity, assume there's only one PGN inside.
+            pgn_file_name: str = zip_ref.namelist()[0]
+            with zip_ref.open(pgn_file_name) as pgn_file:
+              out_file.write(pgn_file.read())
+        # now we have a file name, so keep it
+        pgn_path = out_file.name
+        if cache:
+          cache.AddCachedFile(url, out_file)  # type:ignore
+      # we have the PGN as a file in "pgn_path" for sure here
+      processing_start: float = time.time()
+      for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(pgn_path)):
+        # we are building the DB
+        game_hash: str
+        plys: int
+        nodes: int
+        game_hash, plys, nodes = self.LoadGame(pgn, game)
+        ply_count += plys
+        node_count += nodes
+        if not game_count % 10000 and game_count:
+          delta: float = time.time() - processing_start
+          logging.info(
+              'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
+              '(%0.1f games/s average = %s per million games)',
+              game_count, ply_count, node_count,
+              (100.0 * (ply_count - node_count) / ply_count) if ply_count else 0,
+              base.HumanizedSeconds(delta), game_count / delta,
+              base.HumanizedSeconds(1000000.0 * delta / game_count))
+        yield (game_count, game_hash, plys, pgn, game)

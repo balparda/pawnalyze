@@ -15,17 +15,9 @@ Typical examples:
 """
 
 import argparse
-import io
 import logging
 # import pdb
-import tempfile
-import time
-from typing import Generator, Optional
-import urllib.request
-import zipfile
-
-import chess
-import chess.pgn
+from typing import Optional
 
 from baselib import base
 from pawnalyze import pawnlib
@@ -66,6 +58,36 @@ _SOURCES: dict[str, tuple[str, str, list[str]]] = {  # name: (domain, human_url,
     ),
 }
 _VALID_SOURCES: str = ','.join(str(i) for i in _SOURCES)
+
+
+def _LoadFromURL(
+    url: str,
+    cache: Optional[pawnlib.PGNCache],
+    db: Optional[pawnlib.PGNData],
+    maxload: int,
+    maxprint: int) -> int:
+  """Load a source from URL."""
+  game_count: int = 0
+  if not db:
+    raise NotImplementedError()
+  for game_count, _, _, pgn, game in db.CachedLoadFromURL(url, cache):
+    if maxload > 0 and game_count >= maxload:
+      logging.info('Stopping loading games because reached limit of %d games', maxload)
+      break
+    if not db:
+      # we are printing the games
+      if maxprint > 0 and game_count >= maxprint:
+        logging.info('Stopping printing games because reached limit of %d games', maxprint)
+        break
+      print('*' * 80)
+      print(f'Game # {game_count + 1}')
+      print()
+      print(pgn)
+      if game.errors:
+        print()
+        print(f'  ==>> ERROR: {pawnlib.GAME_ERRORS(game)!r}')
+      print()
+  return game_count
 
 
 def Main() -> None:
@@ -131,115 +153,6 @@ def Main() -> None:
     raise
   finally:
     print(f'{base.TERM_BLUE}{base.TERM_BOLD}THE END: {success_message}{base.TERM_END}')
-
-
-def _GamesFromLargePGN(file_path: str) -> Generator[tuple[str, chess.pgn.Game], None, None]:
-  """Get individual PGN games and parse them."""
-  for game_lines in _SplitLargePGN(file_path):
-    pgn: str = '\n'.join(game_lines)
-    pgn_io = io.StringIO(pgn)
-    game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
-    if not game:
-      raise ValueError(f'No game found in game lines: {game_lines!r}')
-    other_game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
-    if other_game:
-      raise ValueError(f'Game lines have more than one game: {game_lines!r}')
-    yield (pgn, game)
-
-
-def _SplitLargePGN(file_path: str) -> Generator[list[str], None, None]:
-  """A very rough splitting of a huge PGN into individual games."""
-  game_lines: list[str] = []
-  saw_game: bool = False
-  with open(file_path, 'rt', encoding='utf-8', errors='replace') as file_in:
-    count = 0
-    for count, line in enumerate(file_in):
-      # strip the line and skip if empty
-      pgn_line: str = line.strip()
-      if not pgn_line:
-        continue
-      # we have a content line
-      if pgn_line.startswith('['):
-        # we have a header line
-        if game_lines and saw_game:
-          # we have a header+game in the lines, so we output it and restart
-          yield game_lines
-          game_lines, saw_game = [], False
-      else:
-        saw_game = True
-      # add this line to the buffer
-      game_lines.append(pgn_line)
-    # if file didn't end with an empty line, you may have a last game to process:
-    if game_lines:
-      yield game_lines
-    logging.info('Finished parsing %d lines of PGN', count + 1)
-
-
-def _LoadFromURL(
-    url: str,
-    cache: Optional[pawnlib.PGNCache],
-    db: Optional[pawnlib.PGNData],
-    maxload: int,
-    maxprint: int) -> int:
-  """Load a source from URL."""
-  pgn_path: Optional[str] = cache.GetCachedPath(url) if cache else None
-  game_count: int = 0
-  ply_count: int = 0
-  node_count: int = 0
-  with tempfile.NamedTemporaryFile() as out_file:
-    if pgn_path is None:
-      # we don't have the PGN yet: open the URL, download file
-      logging.info('Downloading URL %r', url)
-      with urllib.request.urlopen(url) as response, tempfile.NamedTemporaryFile() as raw_file:
-        raw_file.write(response.read())
-        raw_file.seek(0)
-        # open the temporary file as a ZIP archive
-        logging.info('Unzipping file')
-        with zipfile.ZipFile(raw_file, 'r') as zip_ref:
-          # for simplicity, assume there's only one PGN inside.
-          pgn_file_name: str = zip_ref.namelist()[0]
-          with zip_ref.open(pgn_file_name) as pgn_file:
-            out_file.write(pgn_file.read())
-      # now we have a file name, so keep it
-      pgn_path = out_file.name
-      if cache:
-        cache.AddCachedFile(url, out_file)  # type:ignore
-    # we have the PGN as a file in "pgn_path" for sure here
-    processing_start: float = time.time()
-    for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(pgn_path)):
-      if maxload > 0 and game_count >= maxload:
-        logging.info('Stopping loading games because reached limit of %d games', maxload)
-        break
-      if db:
-        # we are building the DB
-        plys: int
-        nodes: int
-        plys, nodes = db.LoadGame(pgn, game)
-        ply_count += plys
-        node_count += nodes
-        if not game_count % 10000 and game_count:
-          delta: float = time.time() - processing_start
-          logging.info(
-              'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
-              '(%0.1f games/s average = %s per million games)',
-              game_count, ply_count, node_count,
-              (100.0 * (ply_count - node_count) / ply_count) if ply_count else 0,
-              base.HumanizedSeconds(delta), game_count / delta,
-              base.HumanizedSeconds(1000000.0 * delta / game_count))
-      else:
-        # we are printing the games
-        if maxprint > 0 and game_count >= maxprint:
-          logging.info('Stopping printing games because reached limit of %d games', maxprint)
-          break
-        print('*' * 80)
-        print(f'Game # {game_count + 1}')
-        print()
-        print(pgn)
-        if game.errors:
-          print()
-          print(f'  ==>> ERROR: {pawnlib.GAME_ERRORS(game)!r}')
-        print()
-  return game_count
 
 
 if __name__ == '__main__':
