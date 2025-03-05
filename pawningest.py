@@ -222,7 +222,8 @@ def _LoadFromURL(
           logging.info(
               'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
               '(%0.1f games/s average = %s per million games)',
-              game_count, ply_count, node_count, 100.0 * (ply_count - node_count) / ply_count,
+              game_count, ply_count, node_count,
+              (100.0 * (ply_count - node_count) / ply_count) if ply_count else 0,
               base.HumanizedSeconds(delta), game_count / delta,
               base.HumanizedSeconds(1000000.0 * delta / game_count))
       else:

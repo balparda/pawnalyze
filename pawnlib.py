@@ -208,7 +208,8 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
     raise InvalidGameError(GAME_ERRORS(game), ErrorGameCategory.LIBRARY_ERROR)
   # test for non-standard chess games
   if board.chess960 or board.fen() != STANDARD_CHESS_FEN:
-    raise NonStandardGameError()
+    raise NonStandardGameError(
+        f'Non-standard chess game{" (chess960)" if board.chess960 else ""}: {board.fen()}')
   # go over the moves
   for n_ply, move in enumerate(game.mainline_moves()):
     # push the move to the board
@@ -324,72 +325,6 @@ def _FixGameResultHeaderOrRaise(
   raise InvalidGameError('Game has no recorded result and no clear end', ErrorGameCategory.ENDING_ERROR)
 
 
-def _HeaderCompare(
-    ha: dict[str, str], hb: dict[str, str], ply_depth: int) -> tuple[
-        bool, Optional[dict[str, str]]]:
-  """Compare 2 dict headers, ha and hb. If equal also return a new merged header dict.
-
-  Args:
-    ha: Header dict A
-    hb: Header dict B
-
-  Returns:
-    (is_equal, merged_header) ; merged_header will only be present if is_equal is True
-                                and is a new object (not header A nor header B)
-  """
-  # TODO: rewrite... this is bad
-  # first just shallow compare
-  if ha == hb:
-    return (True, ha.copy())  # shallow copy should work for now
-  # first look at 'result': if it is different then games are not the same most probably
-  result_a: str = ha.get('result', '*')
-  result_b: str = hb.get('result', '*')
-  if result_a not in _RESULTS_PGN or result_b not in _RESULTS_PGN:
-    raise ValueError(f'Invalid result/game {ha!r} / {hb!r}')
-  if result_a != result_b:
-    return (False, None)
-  # we should have the same 'result'...
-  # look at 'date': if it is different and significant, then not the same most probably
-  date_a: str = ha.get('date', '?')
-  date_b: str = hb.get('date', '?')
-  if date_a != date_b:
-    return (False, None)
-  # we should have the same 'date'/'result' but date might not be significant...
-  if ply_depth > _PLY_LAX_COMPARISON_DEPTH and (len(date_a) > 4 or len(date_b) > 4):
-    # HEURISTIC: dates can be determinative at high ply counts
-    return (True, _HeaderMerge(ha, hb))
-  # look at names
-  white_a: str = _NormalizeNames(ha.get('white', '?'))
-  white_b: str = _NormalizeNames(hb.get('white', '?'))
-  black_a: str = _NormalizeNames(ha.get('black', '?'))
-  black_b: str = _NormalizeNames(hb.get('black', '?'))
-  if white_a != white_b or black_a != black_b:
-    return (False, None)
-  # we should have the same 'date'/'result'/'white'/'black' but date/names might not be significant...
-  # HEURISTIC: can we suppose they are the same now?
-  return (True, _HeaderMerge(ha, hb))
-
-
-def _HeaderMerge(ha: dict[str, str], hb: dict[str, str]) -> dict[str, str]:
-  """Merge 2 headers avoiding losses."""
-  # TODO: rewrite... this is bad
-  # start with ha
-  hm: dict[str, str] = ha.copy()
-  # carefully copy hb into it:
-  for k, v in hb.items():
-    if k in hm:
-      # key already exists: append if different, leave if equal
-      orig_v: str = hm[k]
-      if k in {'white', 'black'} and _NormalizeNames(v) == _NormalizeNames(orig_v):
-        continue
-      if v != orig_v:
-        hm[k] = f'{orig_v} | {v}'
-    else:
-      # new key: add
-      hm[k] = v
-  return hm
-
-
 # TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
 def FindBestMove(
     fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, int, int]:
@@ -434,7 +369,8 @@ def FindBestMove(
 class PGNData:
   """A PGN Database for Pawnalyze using SQLite."""
 
-  _TABLE_ORDER: list[str] = ['positions', 'games', 'moves', 'error_games']
+  _TABLE_ORDER: list[str] = [
+      'positions', 'games', 'moves', 'idx_games_positions_hash', 'idx_destination_hash']
 
   _TABLES: dict[str, str] = {
 
@@ -443,34 +379,37 @@ class PGNData:
               position_hash TEXT PRIMARY KEY CHECK (length(position_hash) = 32),  -- 128 bit Zobrist hex
               flags INTEGER NOT NULL,  -- PositionFlag integer
               extras TEXT NOT NULL,    -- ExtraInsightPositionFlag ','-separated hex set
-              game_headers TEXT        -- JSON array of game headers or NULL; will include a `game_hash`key
+              game_hashes TEXT         -- ','-separated hex set of game_hash that ended here, if any
           );
       """,
 
       'games': """
           CREATE TABLE IF NOT EXISTS games (
-              game_hash TEXT PRIMARY KEY CHECK  (length(game_hash)     = 64),  -- 256 bit SHA-256 hex
-              position_hash TEXT NOT NULL CHECK (length(position_hash) = 32)   -- 128 bit Zobrist hex
+              game_hash TEXT PRIMARY KEY      CHECK (length(game_hash)         = 64),  -- 256 bit SHA-256 hex
+              end_position_hash TEXT NOT NULL CHECK (length(end_position_hash) = 32),  -- 128 bit Zobrist hex
+              game_plys INTEGER NOT NULL,       -- number of plys if success in parsing, 0 for error games
+              game_headers TEXT NOT NULL,       -- JSON dict with game headers
+              error_category INTEGER NOT NULL,  -- if error game: ErrorGameCategory integer (0 == no error)
+              error_pgn TEXT,                   -- if error game: original PGN
+              error_message TEXT,               -- if error game: some sort of error description
+              FOREIGN KEY(end_position_hash) REFERENCES positions(position_hash) ON DELETE RESTRICT
           );
       """,
+
+      'idx_games_positions_hash': 'CREATE INDEX IF NOT EXISTS idx_games_positions_hash ON games(end_position_hash);',
 
       'moves': """
           CREATE TABLE IF NOT EXISTS moves (
               from_position_hash TEXT NOT NULL CHECK (length(from_position_hash) = 32),  -- 128 bit Zobrist hex
               ply INTEGER NOT NULL,                                                      -- encoded ply for move
-              to_position_hash TEXT NOT NULL CHECK   (length(to_position_hash)   = 32),  -- 128 bit Zobrist hex
-              PRIMARY KEY(from_position_hash, ply)
+              to_position_hash TEXT NOT NULL   CHECK (length(to_position_hash)   = 32),  -- 128 bit Zobrist hex
+              PRIMARY KEY(from_position_hash, ply),
+              FOREIGN KEY(from_position_hash) REFERENCES positions(position_hash) ON DELETE RESTRICT,
+              FOREIGN KEY(to_position_hash) REFERENCES positions(position_hash) ON DELETE RESTRICT
           );
       """,
 
-      'error_games': """
-          CREATE TABLE IF NOT EXISTS error_games (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              category INTEGER NOT NULL,  -- ErrorGameCategory integer
-              pgn TEXT NOT NULL,          -- original PGN
-              error TEXT NOT NULL         -- some sort of error description
-          );
-      """,
+      'idx_destination_hash': 'CREATE INDEX IF NOT EXISTS idx_destination_hash ON moves(to_position_hash);',
 
   }
 
@@ -490,9 +429,10 @@ class PGNData:
       logging.info('Creating new SQLite DB in %r', _PGN_SQL_FILE)
       self._EnsureSchema()
       logging.info('Adding standard chess base position...')
-      self.InsertPosition(
-          STARTING_POSITION_HASH, 0,
-          PositionFlag(PositionFlag.WHITE_TO_MOVE), ExtraInsightPositionFlag(0))
+      with self._conn:
+        self._InsertPosition(
+            STARTING_POSITION_HASH,
+            PositionFlag(PositionFlag.WHITE_TO_MOVE), ExtraInsightPositionFlag(0))
 
   def Close(self) -> None:
     """Close the database connection."""
@@ -503,18 +443,17 @@ class PGNData:
     if (names := set(PGNData._TABLE_ORDER)) != (tables := set(PGNData._TABLES.keys())):
       raise ValueError(
           f'_TABLE_ORDER should be the same keys in _TABLES: {sorted(names)} versus {sorted(tables)}')
-    for name in PGNData._TABLE_ORDER:
-      logging.info('Creating table %r', name)
-      self._conn.execute(PGNData._TABLES[name])
-    self._conn.commit()
+    with self._conn:
+      for name in PGNData._TABLE_ORDER:
+        logging.info('Creating table %r', name)
+        self._conn.execute(PGNData._TABLES[name])
 
   def DropAllTables(self) -> None:
     """Drop all tables from the database (destructive operation)."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    for name in PGNData._TABLE_ORDER[::-1]:
-      logging.info('Deleting table %r', name)
-      cursor.execute(f'DROP TABLE IF EXISTS {name};')
-    self._conn.commit()
+    with self._conn:
+      for name in PGNData._TABLE_ORDER[::-1]:
+        logging.info('Deleting table %r', name)
+        self._conn.execute(f'DROP TABLE IF EXISTS {name};')
     logging.warning('Dropped all database tables')
 
   def DeleteDBFile(self) -> None:
@@ -529,212 +468,182 @@ class PGNData:
     self.DropAllTables()
     self.DeleteDBFile()
 
-  def InsertPosition(
-      self, position_hash: pawnzobrist.Zobrist, n_ply: int,
-      flags: PositionFlag, extras: ExtraInsightPositionFlag,
-      game_header: Optional[dict[str, str]] = None) -> bool:
+  def _InsertPosition(
+      self, position_hash: pawnzobrist.Zobrist, flags: PositionFlag,
+      extras: ExtraInsightPositionFlag, game_hash: Optional[str] = None) -> bool:
     """Insert a position, or update if existing by adding one game. Returns True on new position."""
-    # TODO: make into transaction
-    cur: sqlite3.Cursor = self._conn.cursor()
     # check if position_hash exists
-    cur.execute(
-        'SELECT flags, extras, game_headers FROM positions WHERE position_hash = ?;',
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT flags, extras, game_hashes FROM positions WHERE position_hash = ?;',
         (str(position_hash),))
-    row: Optional[tuple[int, str, Optional[str]]] = cur.fetchone()
-    if row:
-      # we already have this position, so we check if flags are consistent and add headers, if any
-      existing_flags, existing_extras, existing_json = row
-      row_changed = False
-      if existing_flags != flags.value:
-        raise ValueError(
-            f'Conflicting flags for position {position_hash}: '
-            f'{existing_flags} (old) versus {flags} (new)')
-      # add extra flags
-      existing_extras_set: set[str] = set(existing_extras.split(','))
-      if (new_extra := hex(extras.value)[2:]) not in existing_extras_set:
-        existing_extras_set.add(new_extra)
-        row_changed = True
-      # look at headers, if needed
-      updated_headers: Optional[str]
-      if game_header:
-        # merge any new game headers
-        existing_headers: list[dict[str, str]] = [] if existing_json is None else json.loads(existing_json)
-        for i, h in enumerate(existing_headers):
-          g_equal: bool
-          g_merge: Optional[dict[str, str]]
-          g_equal, g_merge = _HeaderCompare(game_header, h, n_ply)
-          if g_equal:
-            if game_header != h:
-              # equal but merged: replace
-              logging.info('Merge: \n%r + \n%r = \n%r', h, game_header, g_merge)
-              existing_headers.pop(i)
-              if g_merge:
-                existing_headers.append(g_merge)
-              row_changed = True
-            break
-        else:
-          # game_header not found in existing_headers
-          existing_headers.append(game_header)
-          row_changed = True
-        updated_headers = json.dumps(existing_headers)
-      else:
-        updated_headers = existing_json
-      # save, if needed
-      if row_changed:
-        cur.execute("""
-            UPDATE positions
-            SET flags = ?, extras = ?, game_headers = ?
-            WHERE position_hash = ?
-        """, (flags.value, ','.join(sorted(existing_extras_set)),
-              updated_headers, str(position_hash)))
-    else:
-      # brand new entry
-      headers_json: Optional[str] = json.dumps([game_header]) if game_header else None
-      cur.execute("""
-          INSERT INTO positions (position_hash, flags, extras, game_headers)
+    row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()
+    if not row:
+      # brand new entry, guaranteed to have only one ExtraInsightPositionFlag & one hash
+      self._conn.execute("""
+          INSERT INTO positions (position_hash, flags, extras, game_hashes)
           VALUES (?, ?, ?, ?)
-      """, (str(position_hash), flags.value, hex(extras.value)[2:], headers_json))
-    self._conn.commit()
-    return not bool(row)
+      """, (str(position_hash), flags.value, hex(extras.value)[2:],
+            game_hash if game_hash else None))
+      return True
+    # we already have this position, so we check if flags are consistent and add headers, if any
+    if row[0] != flags.value:
+      raise ValueError(
+          f'Conflicting flags for position {position_hash}: {row[0]} (old) versus {flags} (new)')
+    # add extra flags
+    row_changed = False
+    existing_extras_set: set[str] = set(row[1].split(','))
+    if (new_extra := hex(extras.value)[2:]) not in existing_extras_set:
+      existing_extras_set.add(new_extra)
+      row_changed = True
+    # add extra hashes, if needed
+    existing_hashes_set: set[str] = set(row[2].split(',')) if row[2] else set()
+    if game_hash:
+      if game_hash not in existing_hashes_set:
+        existing_hashes_set.add(game_hash)
+        row_changed = True
+    # save, if needed
+    if row_changed:
+      self._conn.execute("""
+          UPDATE positions
+          SET extras = ?, game_hashes = ?
+          WHERE position_hash = ?
+      """, (','.join(sorted(existing_extras_set)), ','.join(sorted(existing_hashes_set)),
+            str(position_hash)))
+    return False
 
-  def GetPosition(
-      self, position_hash: pawnzobrist.Zobrist) -> tuple[
-          Optional[PositionFlag], Optional[set[ExtraInsightPositionFlag]],
-          Optional[list[dict[str, str]]]]:
+  def _GetPosition(
+      self, position_hash: pawnzobrist.Zobrist) -> Optional[
+          tuple[PositionFlag, set[ExtraInsightPositionFlag], set[str]]]:
     """Retrieve the PositionFlag for the given hash. Returns None if not found."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute(
-        'SELECT flags, extras, game_headers FROM positions WHERE position_hash = ?;',
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT flags, extras, game_hashes FROM positions WHERE position_hash = ?;',
         (str(position_hash),))
     row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()
     if row is None:
-      return (None, None, None)
+      return None
     flag = PositionFlag(row[0])
     extras: set[ExtraInsightPositionFlag] = set(
         ExtraInsightPositionFlag(int(e, 16)) for e in row[1].split(','))
-    if row[2] is None:
-      return (flag, extras, None)
-    headers: Optional[list[dict[str, str]]] = json.loads(row[2])
-    return (flag, extras, headers if headers else None)
+    return (flag, extras, set() if row[2] is None else set(row[2].split(',')))
 
-  def InsertGame(self, game_hash: str, position_hash: pawnzobrist.Zobrist) -> None:
-    """Insert a game in `game_hash` with position `position_hash`."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute("""
-        INSERT OR IGNORE INTO games(game_hash, position_hash)
-        VALUES(?, ?)
-    """, (game_hash, str(position_hash)))
-    self._conn.commit()
+  def _InsertParsedGame(
+      self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: int,
+      game_headers: dict[str, str]) -> None:
+    """Insert a "successful" game in `game_hash` with `position_hash`, `game_plys`, and `game_headers`."""
+    self._conn.execute("""
+        INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
+        VALUES(?, ?, ?, ?, ?)
+    """, (game_hash, str(end_position_hash), game_plys, json.dumps(game_headers), 0))
 
-  def GetGame(self, game_hash: str) -> Optional[pawnzobrist.Zobrist]:
-    """Return Zobrist for the given `game_hash` or None if not found."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute("""
-        SELECT position_hash
+  def _InsertErrorGame(
+      self, game_hash: str, game_headers: dict[str, str],
+      error_category: ErrorGameCategory, error_pgn: str, error_message: str) -> None:
+    """Insert an error game entry."""
+    self._conn.execute("""
+        INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers,
+                                    error_category, error_pgn, error_message)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+    """, (game_hash, str(STARTING_POSITION_HASH), 0, json.dumps(game_headers),
+          error_category.value, error_pgn, error_message))
+
+  def _GetGame(self, game_hash: str) -> Optional[
+      tuple[pawnzobrist.Zobrist, int, dict[str, str],
+            ErrorGameCategory, Optional[str], Optional[str]]]:
+    """Return game (zobrist, plys, header, err_car, err_pgn, err_message) for game_hash; None if not found."""
+    cursor: sqlite3.Cursor = self._conn.execute("""
+        SELECT end_position_hash, game_plys, game_headers, error_category, error_pgn, error_message
         FROM games
         WHERE game_hash = ?;
     """, (game_hash,))
-    row: Optional[tuple[str]] = cursor.fetchone()
+    row: Optional[tuple[str, int, str, ErrorGameCategory,
+                        Optional[str], Optional[str]]] = cursor.fetchone()
     if not row:
       return None
-    return pawnzobrist.Zobrist(int(row[0], 16)) if row else None
+    return (pawnzobrist.Zobrist(int(row[0], 16)), row[1], json.loads(row[2]),
+            ErrorGameCategory(row[3]), row[4], row[5])
 
-  def InsertMove(
+  def _GetAllGames(self) -> Generator[
+      tuple[str, pawnzobrist.Zobrist, int, dict[str, str],
+            ErrorGameCategory, Optional[str], Optional[str]], None, None]:
+    """Yields all games as (hash, zobrist, plys, header, err_car, err_pgn, err_message)."""
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT game_hash, end_position_hash, game_plys, game_headers, '
+        'error_category, error_pgn, error_message FROM games;')
+    for h, p, i, d, c, s, m in cursor.fetchall():
+      yield (h, pawnzobrist.Zobrist(int(p, 16)), i, json.loads(d), ErrorGameCategory(c), s, m)
+
+  def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
     """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute("""
+    self._conn.execute("""
         INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash)
         VALUES(?, ?, ?)
     """, (str(from_hash), ply, str(to_hash)))
-    self._conn.commit()
 
-  def GetMoves(
+  def _GetMoves(
       self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, pawnzobrist.Zobrist]]:
     """Return a list of (ply, to_position_hash) for the given from_position_hash."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute("""
+    cursor: sqlite3.Cursor = self._conn.execute("""
         SELECT ply, to_position_hash
         FROM moves
         WHERE from_position_hash = ?;
     """, (str(position_hash),))
     return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]
 
-  def InsertErrorGame(self, category: ErrorGameCategory, pgn: str, error: str) -> None:
-    """Insert an error game entry."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute("""
-        INSERT INTO error_games(category, pgn, error)
-        VALUES (?, ?, ?)
-    """, (category.value, pgn, error))
-    self._conn.commit()
-
-  def GetErrorGames(self) -> list[tuple[int, ErrorGameCategory, str, str]]:
-    """Return a list of all (id, category, pgn, error)."""
-    cursor: sqlite3.Cursor = self._conn.cursor()
-    cursor.execute('SELECT id, category, pgn, error FROM error_games;')
-    return [(i, ErrorGameCategory(c), p, e) for i, c, p, e in cursor.fetchall()]
-
   def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[int, int]:
     """Loads game into database. Returns (plys, new_positions)."""
+    # get game_hash and check if we already know this exact game PGN
+    game_hash: str = base.BytesHexHash(original_pgn.encode(encoding='utf-8', errors='replace'))
+    if (done_game := self._GetGame(game_hash)):
+      # we already did this game; nothing to do
+      return (done_game[1], 0)
+    # we don't have this game, so prepare to parse it
     n_ply: int = 0
     new_count: int = 0
     board: Optional[chess.Board] = None
-    game_hash: str = base.BytesHexHash(original_pgn.encode(encoding='utf-8', errors='replace'))
-    if self.GetGame(game_hash):
-      # we already did this game
-      return (0, 0)
+    z_current: pawnzobrist.Zobrist = STARTING_POSITION_HASH
+    game_headers: dict[str, str] = _GameMinimalHeaders(game)
     try:
-      n_ply_checkmate: tuple[int, str] = (0, '')
-      z_current: pawnzobrist.Zobrist = STARTING_POSITION_HASH
-      flags: PositionFlag = PositionFlag(PositionFlag.WHITE_TO_MOVE)
-      extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
-      # parse headers & test for games we don't know the result of
-      game_headers: dict[str, str] = _GameMinimalHeaders(game)
-      _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
-      # go over the moves
-      for n_ply, san, encoded_ply, (z_previous, z_current), board, flags, extras in IterateGame(game):
-        # TODO: make these inserts a transaction?
-        # insert position and move
-        new_count += int(self.InsertPosition(z_current, n_ply, flags, extras))
-        self.InsertMove(z_previous, encoded_ply, z_current)
-        # check for unexpected game endings
-        if (PositionFlag.CHECKMATE in flags and game_headers['result'] == _DRAW_PGN):
-          n_ply_checkmate = (n_ply, san)  # we save this to check later is this is the last move...
-      # reached end of game
-      if board is None:
-        # game had no moves, we will consider this an "error" game
-        raise EmptyGameError()
-      # check for case of games marked draw that are actually checkmate
-      if n_ply_checkmate[0]:
-        if n_ply > n_ply_checkmate[0]:
-          # in this case the game continued *after* checkmate, so we raise
-          raise InvalidGameError(
-              f'Draw result 1/2-1/2 should be checkmate at {n_ply_checkmate[0]}/{n_ply_checkmate[1]}',
-              ErrorGameCategory.ENDING_ERROR)
-        # if we got here: game is checkmated but marked as draw in error
-        game_headers['result'] = _WHITE_WIN_PGN if WHITE_WIN(flags) else _BLACK_WIN_PGN
-        logging.warning('Fixing game ending draw->%s for %r', game_headers['result'], game_headers)
-      # we have a valid game, so we must add the game here
-      self.InsertPosition(z_current, n_ply, flags, extras, game_header=game_headers)
-      self.InsertGame(game_hash, z_current)
-      return (n_ply, new_count)
-    except EmptyGameError as err:
-      # empty game, no moves
-      self.InsertErrorGame(err.category, original_pgn, err.args[0])
-      return (0, 0)
-    except NonStandardGameError as err:
-      # some kind of non-standard chess game
-      self.InsertErrorGame(
-          err.category, original_pgn,
-          f'Non-standard chess{"960" if board and board.chess960 else ""} '
-          f'game: {board.fen() if board else "?"!r}')
-      return (0, 0)
+      with self._conn:  # make all game operations inside one transaction
+        n_ply_checkmate: tuple[int, str] = (0, '')
+        flags: PositionFlag = PositionFlag(PositionFlag.WHITE_TO_MOVE)
+        extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
+        # test for games we don't know the result of
+        _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
+        # go over the moves
+        for n_ply, san, encoded_ply, (z_previous, z_current), board, flags, extras in IterateGame(game):
+          # insert position and move
+          new_count += int(self._InsertPosition(z_current, flags, extras))
+          self._InsertMove(z_previous, encoded_ply, z_current)
+          # check for unexpected game endings
+          if (PositionFlag.CHECKMATE in flags and game_headers['result'] == _DRAW_PGN):
+            n_ply_checkmate = (n_ply, san)  # we save this to check later is this is the last move...
+        # reached end of game
+        if board is None:
+          # game had no moves, we will consider this an "error" game
+          raise EmptyGameError()
+        # check for case of games marked draw that are actually checkmate
+        if n_ply_checkmate[0]:
+          if n_ply > n_ply_checkmate[0]:
+            # in this case the game continued *after* checkmate, so we raise
+            raise InvalidGameError(
+                f'Draw result 1/2-1/2 should be checkmate at {n_ply_checkmate[0]}/{n_ply_checkmate[1]}',
+                ErrorGameCategory.ENDING_ERROR)
+          # if we got here: game is checkmated but marked as draw in error
+          game_headers['result'] = _WHITE_WIN_PGN if WHITE_WIN(flags) else _BLACK_WIN_PGN
+          logging.warning('Fixing game ending draw->%s for %r', game_headers['result'], game_headers)
+        # we have a valid game, so we must add the game here
+        self._InsertPosition(z_current, flags, extras, game_hash=game_hash)
+        self._InsertParsedGame(game_hash, z_current, n_ply, game_headers)
+        return (n_ply, new_count)
     except InvalidGameError as err:
-      # all other parsing errors
-      self.InsertErrorGame(err.category, original_pgn, err.args[0])
-      logging.warning('%s\n%s', str(err), original_pgn)
-      return (n_ply, new_count)
+      # some sort of error in game, insert as error game
+      with self._conn:
+        self._InsertErrorGame(game_hash, game_headers, err.category, original_pgn, err.args[0])
+      # log if error not exactly empty|non-standard (these are plentiful and not interesting to see)
+      if err.category not in {ErrorGameCategory.EMPTY_GAME, ErrorGameCategory.NON_STANDARD_CHESS}:
+        logging.warning('%s\n%r', str(err), original_pgn)
+      return (0, 0)
 
   # TODO: add a method for trimming the tree of nodes without games
 
