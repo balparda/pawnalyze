@@ -159,8 +159,8 @@ As our analysis grows, we must ensure the system can scale and handle the data v
 ### Dependencies
 
 ```sh
-[sudo] pip3 install python-chess litecli # pandas numpy
-$ python3 -m pip install python-chess litecli
+$ [sudo] pip3 install python-chess litecli py7zr # pandas numpy
+$ python3 -m pip install python-chess litecli py7zr
 ```
 
 https://python-chess.readthedocs.io/en/latest/

@@ -13,11 +13,11 @@ import json
 import logging
 import os
 import os.path
-# import pdb
+import pdb
 import sqlite3
 import tempfile
 import time
-from typing import BinaryIO, Callable, Generator, Optional
+from typing import Any, BinaryIO, Callable, Generator, IO, Optional
 import urllib.request
 import zipfile
 
@@ -25,6 +25,7 @@ import chess
 import chess.engine
 import chess.pgn
 import chess.polyglot
+import py7zr
 
 from baselib import base
 from pawnalyze import pawnzobrist
@@ -413,6 +414,28 @@ def FindBestMove(
     return (best_move, 0 if score is None else score, mate_in)
 
 
+def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
+  """Unzips `in_file` to `out_file`. Raises BadZipFile if error."""
+  logging.info('Unzipping file as ZIP')
+  with zipfile.ZipFile(in_file, 'r') as zip_ref:
+    # for simplicity, assume there's only one PGN inside.
+    pgn_file_name: str = zip_ref.namelist()[0]
+    with zip_ref.open(pgn_file_name) as pgn_file:
+      out_file.write(pgn_file.read())
+
+
+def _UnzipSevenZFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
+  logging.info('Unzipping file as 7z')
+  with py7zr.SevenZipFile(in_file, mode='r') as svz_ref:
+    files: Optional[dict[str, IO[Any]]] = svz_ref.read()
+    if files:
+      if len(files) > 1:
+        raise NotImplementedError('7z file had more than one file')
+      for _, file_obj in files.items():
+        out_file.write(file_obj.read())
+        break
+
+
 class PGNCache:
   """PGN cache."""
 
@@ -754,12 +777,14 @@ class PGNData:
           raw_file.write(response.read())
           raw_file.seek(0)
           # open the temporary file as a ZIP archive
-          logging.info('Unzipping file')
-          with zipfile.ZipFile(raw_file, 'r') as zip_ref:
-            # for simplicity, assume there's only one PGN inside.
-            pgn_file_name: str = zip_ref.namelist()[0]
-            with zip_ref.open(pgn_file_name) as pgn_file:
-              out_file.write(pgn_file.read())
+          try:
+            _UnzipZipFile(raw_file, out_file)
+          except zipfile.BadZipFile as err:
+            if 'not a zip' not in str(err):
+              raise
+            # try to unzip as 7z
+            raw_file.seek(0)
+            _UnzipSevenZFile(raw_file, out_file)
         # now we have a file name, so keep it
         pgn_path = out_file.name
         if cache:

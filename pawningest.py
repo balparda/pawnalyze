@@ -52,8 +52,7 @@ _SOURCES: dict[str, tuple[str, str, list[str]]] = {  # name: (domain, human_url,
         'figshare.com',
         'https://figshare.com/articles/dataset/Chess_Database/4276523',
         [
-            'https://ndownloader.figstatic.com/files/6971717',  # all
-            'https://ndownloader.figstatic.com/files/6971729',  # filtered
+            'https://ndownloader.figstatic.com/files/6971717',
         ]
     ),
 }
@@ -90,6 +89,26 @@ def _LoadFromURL(
   return game_count
 
 
+def _LoadFromSource(
+    source: str,
+    cache: Optional[pawnlib.PGNCache],
+    db: Optional[pawnlib.PGNData],
+    maxload: int,
+    maxprint: int) -> int:
+  """Load a source from URL."""
+  source = source.strip().lower()
+  if source not in _SOURCES:
+    raise ValueError(f'Invalid source {source!r}')
+  domain, human_url, download_urls = _SOURCES[source]
+  logging.info('Reading from source %s: %s (%s)', source, domain, human_url)
+  game_count: int = 0
+  if not db:
+    raise NotImplementedError()
+  for url in download_urls:
+    game_count += _LoadFromURL(url, cache, db, maxload, maxprint)
+  return game_count
+
+
 def Main() -> None:
   """Main PawnIngest."""
   # parse the input arguments, do some basic checks
@@ -117,6 +136,8 @@ def Main() -> None:
   sources: list[str] = [s.strip() for s in args.sources]
   if not sources and not url:
     raise ValueError('we must have either -s/--sources or -u/--url to load from')
+  if any(s.strip().lower() not in _SOURCES for s in sources):
+    raise ValueError(f'Invalid source in {sources}, valid are {_VALID_SOURCES}')
   maxload: int = args.maxload if args.maxload >= 0 else 0
   maxprint: int = args.maxprint if args.maxprint >= 0 else 0
   db_readonly = bool(args.readonly)
@@ -138,7 +159,8 @@ def Main() -> None:
         if url:
           _LoadFromURL(url, pgn_cache, database, maxload, maxprint)
         elif sources:
-          raise NotImplementedError()
+          for source in sorted(sources):
+            _LoadFromSource(source, pgn_cache, database, maxload, maxprint)
         else:
           raise NotImplementedError('No sources found')
       print()
