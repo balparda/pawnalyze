@@ -16,6 +16,8 @@ Typical examples:
 
 import argparse
 import logging
+import os
+import os.path
 # import pdb
 from typing import Optional
 
@@ -28,26 +30,28 @@ __version__ = (1, 0)
 
 # sources we can handle should be "registered" here!
 _SOURCES: dict[str, tuple[str, str, list[str]]] = {  # name: (domain, human_url, list[download_url])
-    'lumbrasgigabase': (
-        'lumbrasgigabase.com',
-        'https://lumbrasgigabase.com/',
-        [
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2023-2/?wpdmdl=8752&amp;refresh=67bf14f94fce91740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2023/?wpdmdl=8068&amp;refresh=67bf14f950eac1740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2022/?wpdmdl=8069&amp;refresh=67bf14f951d761740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2021/?wpdmdl=8070&amp;refresh=67bf14f9529681740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2020/?wpdmdl=8071&amp;refresh=67bf14f95351b1740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2015-to-2019/?wpdmdl=8072&amp;refresh=67bf14f9540b71740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2005-to-2009/?wpdmdl=8074&amp;refresh=67bf14f954bf31740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2000-to-2004/?wpdmdl=8075&amp;refresh=67bf14f9557e91740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1990-to-1999/?wpdmdl=8076&amp;refresh=67bf14f9565111740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2010-to-2014/?wpdmdl=8073&amp;refresh=67bf14f9570a41740575993',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1970-to-1989/?wpdmdl=8077&amp;refresh=67bf160c614521740576268',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1950-to-1969/?wpdmdl=8078&amp;refresh=67bf160c62c4e1740576268',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1900-to-1949/?wpdmdl=8081&amp;refresh=67bf160c63fe71740576268',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-until-1899/?wpdmdl=8079&amp;refresh=67bf160c653251740576268',
-            'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-with-no-date/?wpdmdl=8080&amp;refresh=67bf160c666221740576268',
-        ]),
+    # 'lumbrasgigabase': (
+    #     'lumbrasgigabase.com',
+    #     'https://lumbrasgigabase.com/',
+    #     [
+    #         'blob:https://mega.nz/834c3f58-1bf8-4e5c-8bac-2e59c30b5ca7',
+
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2023-2/?wpdmdl=8752&amp;refresh=67bf14f94fce91740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2023/?wpdmdl=8068&amp;refresh=67bf14f950eac1740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2022/?wpdmdl=8069&amp;refresh=67bf14f951d761740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2021/?wpdmdl=8070&amp;refresh=67bf14f9529681740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2020/?wpdmdl=8071&amp;refresh=67bf14f95351b1740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2015-to-2019/?wpdmdl=8072&amp;refresh=67bf14f9540b71740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2005-to-2009/?wpdmdl=8074&amp;refresh=67bf14f954bf31740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2000-to-2004/?wpdmdl=8075&amp;refresh=67bf14f9557e91740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1990-to-1999/?wpdmdl=8076&amp;refresh=67bf14f9565111740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2010-to-2014/?wpdmdl=8073&amp;refresh=67bf14f9570a41740575993',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1970-to-1989/?wpdmdl=8077&amp;refresh=67bf160c614521740576268',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1950-to-1969/?wpdmdl=8078&amp;refresh=67bf160c62c4e1740576268',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1900-to-1949/?wpdmdl=8081&amp;refresh=67bf160c63fe71740576268',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-until-1899/?wpdmdl=8079&amp;refresh=67bf160c653251740576268',
+    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-with-no-date/?wpdmdl=8080&amp;refresh=67bf160c666221740576268',
+    #     ]),
     'figshare': (
         'figshare.com',
         'https://figshare.com/articles/dataset/Chess_Database/4276523',
@@ -109,6 +113,51 @@ def _LoadFromSource(
   return game_count
 
 
+def _LoadFromFile(
+    file_path: str,
+    db: Optional[pawnlib.PGNData],
+    maxload: int,
+    maxprint: int) -> int:
+  """Load a source from URL."""
+  game_count: int = 0
+  if not db:
+    raise NotImplementedError()
+  for game_count, _, _, pgn, game in db.LoadFromDisk(file_path):
+    if maxload > 0 and game_count >= maxload:
+      logging.info('Stopping loading games because reached limit of %d games', maxload)
+      break
+    if not db:
+      # we are printing the games
+      if maxprint > 0 and game_count >= maxprint:
+        logging.info('Stopping printing games because reached limit of %d games', maxprint)
+        break
+      print('*' * 80)
+      print(f'Game # {game_count + 1}')
+      print()
+      print(pgn)
+      if game.errors:
+        print()
+        print(f'  ==>> ERROR: {pawnlib.GAME_ERRORS(game)!r}')
+      print()
+  return game_count
+
+
+def _LoadFromDirectory(
+    dir_path: str,
+    db: Optional[pawnlib.PGNData],
+    maxload: int,
+    maxprint: int) -> int:
+  """Load files from directory."""
+  game_count: int = 0
+  for dirpath, _, filenames in os.walk(dir_path):
+    logging.info('Reading files from %r', dirpath)
+    for file_name in sorted(filenames):
+      file_path: str = os.path.join(dirpath, file_name)
+      if file_path.endswith('.pgn'):
+        game_count += _LoadFromFile(file_path, db, maxload, maxprint)
+  return game_count
+
+
 def Main() -> None:
   """Main PawnIngest."""
   # parse the input arguments, do some basic checks
@@ -119,6 +168,12 @@ def Main() -> None:
   parser.add_argument(
       '-u', '--url', type=str, default='',
       help='URL to load from (default: empty); if given, overrides -s/--sources flag')
+  parser.add_argument(
+      '-f', '--file', type=str, default='',
+      help='local file to load from (default: empty); if given, overrides -s/--sources flag')
+  parser.add_argument(
+      '-d', '--dir', type=str, default='',
+      help='local dir to load from (default: empty); if given, overrides -s/--sources flag')
   parser.add_argument(
       '-l', '--maxload', type=int, default=0,
       help='Maximum number of games to read from source; 0==infinite (default: 0, i.e., infinite)')
@@ -133,9 +188,12 @@ def Main() -> None:
       help='If "True" will not use cache, will re-download files (default: False)')
   args: argparse.Namespace = parser.parse_args()
   url: str = args.url.strip()
-  sources: list[str] = [s.strip() for s in args.sources]
-  if not sources and not url:
-    raise ValueError('we must have either -s/--sources or -u/--url to load from')
+  local_file_path: str = args.file.strip()
+  local_dir_path: str = args.dir.strip()
+  sources: list[str] = ([s.strip() for s in args.sources] if isinstance(args.sources, list) else  # type:ignore
+                        [args.sources.strip()])
+  if not sources and not url and not local_file_path and not local_dir_path:
+    raise ValueError('must have -s/--sources or -u/--url or -f/--file or -d/--dir to load from')
   if any(s.strip().lower() not in _SOURCES for s in sources):
     raise ValueError(f'Invalid source in {sources}, valid are {_VALID_SOURCES}')
   maxload: int = args.maxload if args.maxload >= 0 else 0
@@ -158,6 +216,10 @@ def Main() -> None:
       with base.Timer() as op_timer:
         if url:
           _LoadFromURL(url, pgn_cache, database, maxload, maxprint)
+        elif local_file_path:
+          _LoadFromFile(local_file_path, database, maxload, maxprint)
+        elif local_dir_path:
+          _LoadFromDirectory(local_dir_path, database, maxload, maxprint)
         elif sources:
           for source in sorted(sources):
             _LoadFromSource(source, pgn_cache, database, maxload, maxprint)

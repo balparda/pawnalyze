@@ -424,7 +424,7 @@ def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
       out_file.write(pgn_file.read())
 
 
-def _UnzipSevenZFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
+def _UnzipSevenZFile(in_file: str, out_file: IO[Any]) -> None:
   logging.info('Unzipping file as 7z')
   with py7zr.SevenZipFile(in_file, mode='r') as svz_ref:
     files: Optional[dict[str, IO[Any]]] = svz_ref.read()
@@ -766,9 +766,6 @@ class PGNData:
       tuple[int, str, int, str, chess.pgn.Game], None, None]:
     """Load a source from URL into DB, cached, yields (n, hash, plys, pgn, game)."""
     pgn_path: Optional[str] = cache.GetCachedPath(url) if cache else None
-    game_count: int = 0
-    ply_count: int = 0
-    node_count: int = 0
     with tempfile.NamedTemporaryFile() as out_file:
       if pgn_path is None:
         # we don't have the PGN yet: open the URL, download file
@@ -783,29 +780,37 @@ class PGNData:
             if 'not a zip' not in str(err):
               raise
             # try to unzip as 7z
-            raw_file.seek(0)
-            _UnzipSevenZFile(raw_file, out_file)
+            _UnzipSevenZFile(raw_file.name, out_file)
         # now we have a file name, so keep it
         pgn_path = out_file.name
         if cache:
           cache.AddCachedFile(url, out_file)  # type:ignore
       # we have the PGN as a file in "pgn_path" for sure here
-      processing_start: float = time.time()
-      for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(pgn_path)):
-        # we are building the DB
-        game_hash: str
-        plys: int
-        nodes: int
-        game_hash, plys, nodes = self.LoadGame(pgn, game)
-        ply_count += plys
-        node_count += nodes
-        if not game_count % 10000 and game_count:
-          delta: float = time.time() - processing_start
-          logging.info(
-              'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
-              '(%0.1f games/s average = %s per million games)',
-              game_count, ply_count, node_count,
-              (100.0 * (ply_count - node_count) / ply_count) if ply_count else 0,
-              base.HumanizedSeconds(delta), game_count / delta,
-              base.HumanizedSeconds(1000000.0 * delta / game_count))
+      for game_count, game_hash, plys, pgn, game in self.LoadFromDisk(pgn_path):
         yield (game_count, game_hash, plys, pgn, game)
+
+  def LoadFromDisk(self, file_path: str) -> Generator[
+      tuple[int, str, int, str, chess.pgn.Game], None, None]:
+    """Load a source from local file, yields (n, hash, plys, pgn, game)."""
+    game_count: int = 0
+    ply_count: int = 0
+    node_count: int = 0
+    processing_start: float = time.time()
+    for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(file_path)):
+      # we are building the DB
+      game_hash: str
+      plys: int
+      nodes: int
+      game_hash, plys, nodes = self.LoadGame(pgn, game)
+      ply_count += plys
+      node_count += nodes
+      if not game_count % 10000 and game_count:
+        delta: float = time.time() - processing_start
+        logging.info(
+            'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
+            '(%0.1f games/s average = %s per million games)',
+            game_count, ply_count, node_count,
+            (100.0 * (ply_count - node_count) / ply_count) if ply_count else 0,
+            base.HumanizedSeconds(delta), game_count / delta,
+            base.HumanizedSeconds(1000000.0 * delta / game_count))
+      yield (game_count, game_hash, plys, pgn, game)
