@@ -17,7 +17,7 @@ import os.path
 import sqlite3
 import tempfile
 import time
-from typing import Any, BinaryIO, Callable, Generator, IO, Optional
+from typing import Any, BinaryIO, Callable, Generator, IO, Optional, TypedDict
 import urllib.request
 import zipfile
 
@@ -165,10 +165,41 @@ _RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
 # at what ply depth should we be more lax with game comparisons?
 _PLY_LAX_COMPARISON_DEPTH: int = 40  # i.e., if game is beyond 20th move and is much less likely to repeat
 
-
 # convert a chess.Move into an integer we can use to index our dictionaries
 EncodePly: Callable[[chess.Move], int] = lambda m: (
     m.from_square * 100 + m.to_square + (m.promotion * 1000000 if m.promotion else 0))
+
+
+class PositionEval(TypedDict):
+  """Chess engine evaluation of a position.
+
+  For `mate`:
+      0 = no forced mate found (look at `score`)
+      +N (positive) = side to move mates in N
+      -N (negative) = opponent side mates in abs(N)
+
+  For `score`:
+      0 = mate found (look at `mate`)
+      +N (positive) = side to move is ahead by N / 100 pawns
+      -N (negative) = opponent side is ahead by abs(N) / 100 pawns
+  """
+  # TODO: confirm the info in pydoc!
+  depth: int  # depth of this evaluation
+  best: int   # best found move; encoded
+  mate: int   # 0 no mate; !=0 position has mate-in-N (==abs(mate)); >0 side to move; <0 opponent
+  score: int  # score, only if mate==0, in centi-pawns
+  # AVOID adding stuff here; if you do, change EncodeEval() & DecodeEval() and MIGRATE THE DB!!
+
+
+EncodeEval: Callable[[PositionEval], str] = lambda e: ','.join(
+    hex(e[k])[2:] for k in ('depth', 'best', 'mate', 'score'))
+
+
+def DecodeEval(evaluation: str) -> PositionEval:
+  """Decode position evaluation from ','-separated hex."""
+  depth, best, mate, score = evaluation.split(',')
+  return PositionEval(
+      depth=int(depth, 16), best=int(best, 16), mate=int(mate, 16), score=int(score, 16))
 
 
 def DecodePly(ply: int) -> chess.Move:
@@ -376,7 +407,7 @@ def _FixGameResultHeaderOrRaise(
 
 # TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
 def FindBestMove(
-    fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, int, int]:
+    fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, PositionEval]:
   """Finds the best move for a position (FEN) up to a depth.
 
   Args:
@@ -385,12 +416,10 @@ def FindBestMove(
     engine_path: (default 'stockfish') the engine path to invoke
 
   Returns:
-    (best_move, score, mate_in_n), where best_move is a chess.Move, score is in centi-pawns,
-        and mate_in_n can be:
-          0 = no forced mate found
-          +N (positive) = side to move mates in N
-          -N (negative) = opponent side mates in abs(N)
+    (best_move, PositionEval), where best_move is a chess.Move and see PositionEval for details
   """
+  if depth < 5:
+    raise ValueError('Chess engine depth must be 5 or larger')
   # open Stockfish in UCI mode
   with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
     # ask for an analysis from engine
@@ -412,7 +441,8 @@ def FindBestMove(
       # mate_in < 0 => the opponent is mating in abs(n_mate) moves
       mate_in = n_mate
     score: Optional[int] = relative_score.score()
-    return (best_move, 0 if score is None else score, mate_in)
+    return (best_move, PositionEval(
+        depth=depth, best=EncodePly(best_move), mate=mate_in, score=0 if score is None else score))
 
 
 def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
@@ -484,7 +514,8 @@ class PGNData:
   """A PGN Database for Pawnalyze using SQLite."""
 
   _TABLE_ORDER: list[str] = [
-      'positions', 'games', 'moves', 'idx_games_positions_hash', 'idx_destination_hash']
+      'positions', 'games', 'duplicate_games', 'moves',
+      'idx_games_positions_hash', 'idx_duplicates_hash', 'idx_destination_hash']
 
   _TABLES: dict[str, str] = {
 
@@ -493,6 +524,7 @@ class PGNData:
               position_hash TEXT PRIMARY KEY CHECK (length(position_hash) = 32),  -- 128 bit Zobrist hex
               flags INTEGER NOT NULL,  -- PositionFlag integer
               extras TEXT NOT NULL,    -- ExtraInsightPositionFlag ','-separated hex set
+              engine TEXT,             -- ','-separated hex tuple with PositionEval(depth,move,mate,score)
               game_hashes TEXT         -- ','-separated hex set of game_hash that ended here, if any
           );
       """,
@@ -511,6 +543,16 @@ class PGNData:
       """,
 
       'idx_games_positions_hash': 'CREATE INDEX IF NOT EXISTS idx_games_positions_hash ON games(end_position_hash);',
+
+      'duplicate_games': """
+          CREATE TABLE IF NOT EXISTS duplicate_games (
+              game_hash TEXT PRIMARY KEY CHECK (length(game_hash)    = 64),  -- 256 bit SHA-256 hex
+              duplicate_of TEXT NOT NULL CHECK (length(duplicate_of) = 64),  -- 256 bit SHA-256 hex
+              FOREIGN KEY(duplicate_of) REFERENCES games(game_hash) ON DELETE RESTRICT
+          );
+      """,
+
+      'idx_duplicates_hash': 'CREATE INDEX IF NOT EXISTS idx_duplicates_hash ON duplicate_games(duplicate_of);',
 
       'moves': """
           CREATE TABLE IF NOT EXISTS moves (
@@ -537,6 +579,7 @@ class PGNData:
     exists_db: bool = os.path.exists(_PGN_SQL_FILE)
     self._conn: sqlite3.Connection = sqlite3.connect(_PGN_SQL_FILE)
     self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
+    self._known_hashes: Optional[set[str]] = None    # lazy hashes cache
     if exists_db:
       logging.info('Opening SQLite DB in %r', _PGN_SQL_FILE)
     else:
@@ -627,18 +670,29 @@ class PGNData:
 
   def _GetPosition(
       self, position_hash: pawnzobrist.Zobrist) -> Optional[
-          tuple[PositionFlag, set[ExtraInsightPositionFlag], set[str]]]:
+          tuple[PositionFlag, set[ExtraInsightPositionFlag], Optional[PositionEval], set[str]]]:
     """Retrieve the PositionFlag for the given hash. Returns None if not found."""
     cursor: sqlite3.Cursor = self._conn.execute(
-        'SELECT flags, extras, game_hashes FROM positions WHERE position_hash = ?;',
+        'SELECT flags, extras, engine, game_hashes FROM positions WHERE position_hash = ?;',
         (str(position_hash),))
-    row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()  # primary key == position_hash
+    row: Optional[tuple[int, str, Optional[str], Optional[str]]] = cursor.fetchone()  # primary key == position_hash
     if row is None:
       return None
     flag = PositionFlag(row[0])
     extras: set[ExtraInsightPositionFlag] = set(
         ExtraInsightPositionFlag(int(e, 16)) for e in row[1].split(','))
-    return (flag, extras, set() if row[2] is None else set(row[2].split(',')))
+    return (flag, extras,
+            None if row[2] is None else DecodeEval(row[2]),
+            set() if row[3] is None else set(row[3].split(',')))
+
+  def _UpdatePositionEvaluation(
+      self, position_hash: pawnzobrist.Zobrist, evaluation: PositionEval) -> None:
+    """Update a position setting its engine evaluation. Position must exist previously."""
+    self._conn.execute("""
+        UPDATE positions
+        SET engine = ?
+        WHERE position_hash = ?
+    """, (EncodeEval(evaluation), str(position_hash)))
 
   def _InsertParsedGame(
       self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
@@ -690,6 +744,51 @@ class PGNData:
              [] if i == '-' else [int(k, 16) for k in i.split(',')],
              json.loads(d), ErrorGameCategory(c), s, m)
 
+  def _GetAllGameHashes(self) -> set[str]:
+    """Gets all game hashes."""
+    cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM games;')
+    return {h[0] for h in cursor}  # stream into set
+
+  def _InsertDuplicateGame(self, game_hash: str, duplicate_of: str) -> None:
+    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash."""
+    self._conn.execute("""
+        INSERT OR IGNORE INTO duplicate_game(game_hash, duplicate_of)
+        VALUES(?, ?)
+    """, (game_hash, duplicate_of))
+
+  def _GetDuplicateGame(self, game_hash: str) -> Optional[str]:
+    """Return duplicate for `game_hash` as hash into `games` table; None if not found."""
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT duplicate_of FROM duplicate_games WHERE game_hash = ?;', (game_hash,))
+    row: Optional[tuple[str]] = cursor.fetchone()  # primary key == game_hash
+    return None if not row else row[0]
+
+  def _GetDuplicatesOf(self, duplicate_of: str) -> set[str]:
+    """Return a set of duplicates `game_hash` for the given actual `game_hash`."""
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT game_hash FROM duplicate_games WHERE duplicate_of = ?;', (duplicate_of,))
+    return {g[0] for g in cursor.fetchall()}  # non-stream
+
+  def _GetAllDuplicateHashes(self) -> set[str]:
+    """Gets all duplicate game hashes."""
+    cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM duplicate_games;')
+    return {h[0] for h in cursor}  # stream into set
+
+  def _GetAllKnownHashes(self) -> set[str]:
+    """Gets all game hashes in DB, all from table `games` and all from `duplicate_games`."""
+    all_hashes: set[str] = self._GetAllGameHashes()
+    all_hashes.update(self._GetAllDuplicateHashes())
+    return all_hashes
+
+  def IsHashInDB(self, game_hash: str) -> bool:
+    """Checks if a `game_hash` was in the DB at the beginning of a run."""
+    # lazy load of cache
+    if self._known_hashes is None:
+      self._known_hashes = self._GetAllKnownHashes()
+      logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
+    # lookup
+    return game_hash in self._known_hashes
+
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
     """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
@@ -712,9 +811,9 @@ class PGNData:
     """Loads game into database. Returns (game_hash, plys, new_positions)."""
     # get game_hash and check if we already know this exact game PGN
     game_hash: str = base.BytesHexHash(original_pgn.encode(encoding='utf-8', errors='replace'))
-    if (done_game := self._GetGame(game_hash)):
-      # we already did this game; nothing to do
-      return (game_hash, len(done_game[1]), 0)
+    # first check in hashes cache
+    if self.IsHashInDB(game_hash):
+      return (game_hash, 0, 0)  # found in cache
     # we don't have this game, so prepare to parse it
     n_ply: int = 0
     encoded_plys: list[int] = []
@@ -727,6 +826,10 @@ class PGNData:
         n_ply_checkmate: tuple[int, str] = (0, '')
         flags: PositionFlag = PositionFlag(PositionFlag.WHITE_TO_MOVE)
         extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
+        # hashes cache was loaded at startup, so we still have to re-check before we process/insert
+        if (done_game := self._GetGame(game_hash)):
+          # we already did this game; nothing to do
+          return (game_hash, len(done_game[1]), 0)
         # test for games we don't know the result of
         _FixGameResultHeaderOrRaise(original_pgn, game, game_headers)
         # go over the moves
@@ -765,8 +868,6 @@ class PGNData:
         logging.warning('%s\n%r', str(err), original_pgn)
       return (game_hash, 0, 0)
 
-  # TODO: add a method for trimming the tree of nodes without games
-
   # TODO: add a method for duplicate game in a node detection
 
   def CachedLoadFromURL(self, url: str, cache: Optional[PGNCache]) -> Generator[
@@ -801,6 +902,7 @@ class PGNData:
     """Load a source from local file, yields (n, hash, plys, pgn, game)."""
     game_count: int = 0
     ply_count: int = 0
+    last_ply: int = 0
     node_count: int = 0
     actual_game_count: int = 0
     actual_loaded_count: int = 0
@@ -826,7 +928,9 @@ class PGNData:
             '(%0.1f games/s %0.1f plys/s = %s per million games)',
             game_count, ply_count, node_count,
             (100.0 * (actual_loaded_count - node_count) / actual_loaded_count) if actual_loaded_count else 0,
-            base.HumanizedSeconds(total_time), _PRINT_EVERY_N / delta, plys / delta,
+            base.HumanizedSeconds(total_time), _PRINT_EVERY_N / delta,
+            (actual_loaded_count - last_ply) / delta,
             base.HumanizedSeconds(1000000.0 * total_time / actual_game_count) if actual_game_count else '?')
         last_time = now
+        last_ply = actual_loaded_count
       yield (game_count, game_hash, plys, pgn, game)
