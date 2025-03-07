@@ -640,11 +640,9 @@ class PGNData:
     row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()  # primary key == position_hash
     if not row:
       # brand new entry, guaranteed to have only one ExtraInsightPositionFlag & one hash
-      self._conn.execute("""
-          INSERT INTO positions (position_hash, flags, extras, game_hashes)
-          VALUES (?, ?, ?, ?)
-      """, (str(position_hash), flags.value, f'{extras.value:x}',
-            game_hash if game_hash else None))
+      self._conn.execute(
+          'INSERT INTO positions (position_hash, flags, extras, game_hashes) VALUES (?, ?, ?, ?)',
+          (str(position_hash), flags.value, f'{extras.value:x}', game_hash if game_hash else None))
       return True
     # we already have this position, so we check if flags are consistent and add headers, if any
     if row[0] != flags.value:
@@ -664,12 +662,10 @@ class PGNData:
         row_changed = True
     # save, if needed
     if row_changed:
-      self._conn.execute("""
-          UPDATE positions
-          SET extras = ?, game_hashes = ?
-          WHERE position_hash = ?
-      """, (','.join(sorted(existing_extras_set)), ','.join(sorted(existing_hashes_set)),
-            str(position_hash)))
+      self._conn.execute(
+          'UPDATE positions SET extras = ?, game_hashes = ? WHERE position_hash = ?',
+          (','.join(sorted(existing_extras_set)),
+           ','.join(sorted(existing_hashes_set)), str(position_hash)))
     return False
 
   def _GetPosition(
@@ -692,18 +688,16 @@ class PGNData:
   def _UpdatePositionEvaluation(
       self, position_hash: pawnzobrist.Zobrist, evaluation: PositionEval) -> None:
     """Update a position setting its engine evaluation. Position must exist previously."""
-    self._conn.execute("""
-        UPDATE positions
-        SET engine = ?
-        WHERE position_hash = ?
-    """, (EncodeEval(evaluation), str(position_hash)))
+    self._conn.execute(
+        'UPDATE positions SET engine = ? WHERE position_hash = ?',
+        (EncodeEval(evaluation), str(position_hash)))
 
   def _InsertParsedGame(
       self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
       game_headers: dict[str, str]) -> None:
     """Insert a "successful" game in `game_hash` with `position_hash`, `game_plys`, and `game_headers`."""
     self._conn.execute("""
-        INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
+        INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
         VALUES(?, ?, ?, ?, ?)
     """, (game_hash, str(end_position_hash), ','.join(f'{p:x}' for p in game_plys),
           json.dumps(game_headers), 0))
@@ -713,8 +707,8 @@ class PGNData:
       error_category: ErrorGameCategory, error_pgn: str, error_message: str) -> None:
     """Insert an error game entry."""
     self._conn.execute("""
-        INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers,
-                                    error_category, error_pgn, error_message)
+        INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers,
+                          error_category, error_pgn, error_message)
         VALUES(?, ?, ?, ?, ?, ?, ?)
     """, (game_hash, str(STARTING_POSITION_HASH), '-', json.dumps(game_headers),
           error_category.value, error_pgn, error_message))
@@ -740,25 +734,25 @@ class PGNData:
       tuple[str, pawnzobrist.Zobrist, list[int], dict[str, str],
             ErrorGameCategory, Optional[str], Optional[str]], None, None]:
     """Yields all games as (hash, zobrist, plys, header, err_car, err_pgn, err_message)."""
-    cursor: sqlite3.Cursor = self._conn.execute(
-        'SELECT game_hash, end_position_hash, game_plys, game_headers, '
-        'error_category, error_pgn, error_message FROM games;')
+    cursor: sqlite3.Cursor = self._conn.execute("""
+        SELECT game_hash, end_position_hash, game_plys, game_headers, error_category, error_pgn, error_message
+        FROM games;
+    """)
     for h, p, i, d, c, s, m in cursor:  # stream results...
       yield (h, pawnzobrist.Zobrist(int(p, 16)),
              [] if i == '-' else [int(k, 16) for k in i.split(',')],
              json.loads(d), ErrorGameCategory(c), s, m)
 
-  def _GetAllGameHashes(self) -> set[str]:
+  def GetAllGameHashes(self) -> set[str]:
     """Gets all game hashes."""
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM games;')
     return {h[0] for h in cursor}  # stream into set
 
   def _InsertDuplicateGame(self, game_hash: str, duplicate_of: str) -> None:
     """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash."""
-    self._conn.execute("""
-        INSERT OR IGNORE INTO duplicate_game(game_hash, duplicate_of)
-        VALUES(?, ?)
-    """, (game_hash, duplicate_of))
+    self._conn.execute(
+        'INSERT OR IGNORE INTO duplicate_games(game_hash, duplicate_of) VALUES(?, ?)',
+        (game_hash, duplicate_of))
 
   def _GetDuplicateGame(self, game_hash: str) -> Optional[str]:
     """Return duplicate for `game_hash` as hash into `games` table; None if not found."""
@@ -773,22 +767,22 @@ class PGNData:
         'SELECT game_hash FROM duplicate_games WHERE duplicate_of = ?;', (duplicate_of,))
     return {g[0] for g in cursor.fetchall()}  # non-stream
 
-  def _GetAllDuplicateHashes(self) -> set[str]:
+  def GetAllDuplicateHashes(self) -> set[str]:
     """Gets all duplicate game hashes."""
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM duplicate_games;')
     return {h[0] for h in cursor}  # stream into set
 
-  def _GetAllKnownHashes(self) -> set[str]:
+  def GetAllKnownHashes(self) -> set[str]:
     """Gets all game hashes in DB, all from table `games` and all from `duplicate_games`."""
-    all_hashes: set[str] = self._GetAllGameHashes()
-    all_hashes.update(self._GetAllDuplicateHashes())
+    all_hashes: set[str] = self.GetAllGameHashes()
+    all_hashes.update(self.GetAllDuplicateHashes())
     return all_hashes
 
   def IsHashInDB(self, game_hash: str) -> bool:
     """Checks if a `game_hash` was in the DB at the beginning of a run."""
     # lazy load of cache
     if self._known_hashes is None:
-      self._known_hashes = self._GetAllKnownHashes()
+      self._known_hashes = self.GetAllKnownHashes()
       logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
     # lookup
     return game_hash in self._known_hashes
@@ -796,10 +790,9 @@ class PGNData:
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
     """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
-    self._conn.execute("""
-        INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash)
-        VALUES(?, ?, ?)
-    """, (str(from_hash), ply, str(to_hash)))
+    self._conn.execute(
+        'INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash) VALUES(?, ?, ?)',
+        (str(from_hash), ply, str(to_hash)))
 
   def _GetMoves(
       self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, pawnzobrist.Zobrist]]:
@@ -904,7 +897,7 @@ class PGNData:
     """)
     rows: list[tuple[str, str]] = cursor.fetchall()
     # we'll need to skip game_hashes already in duplicate_games:
-    known_duplicates: set[str] = self._GetAllDuplicateHashes()
+    known_duplicates: set[str] = self.GetAllDuplicateHashes()
     merges_done: list[dict[str, Any]] = []  # the return with info on merges we'll do
     # go over the games that have ending positions with more than one hash
     for position_hash, g_hashes_str in rows:
