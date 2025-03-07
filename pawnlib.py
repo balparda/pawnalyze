@@ -165,25 +165,20 @@ _RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
 # at what ply depth should we be more lax with game comparisons?
 _PLY_LAX_COMPARISON_DEPTH: int = 40  # i.e., if game is beyond 20th move and is much less likely to repeat
 
-# convert a chess.Move into an integer we can use to index our dictionaries
-EncodePly: Callable[[chess.Move], int] = lambda m: (
-    m.from_square * 100 + m.to_square + (m.promotion * 1000000 if m.promotion else 0))
-
 
 class PositionEval(TypedDict):
   """Chess engine evaluation of a position.
 
   For `mate`:
       0 = no forced mate found (look at `score`)
-      +N (positive) = side to move mates in N
-      -N (negative) = opponent side mates in abs(N)
+      +N (positive) = side to move mates in N plys
+      -N (negative) = opponent side mates in abs(N) plys
 
   For `score`:
       0 = mate found (look at `mate`)
       +N (positive) = side to move is ahead by N / 100 pawns
       -N (negative) = opponent side is ahead by abs(N) / 100 pawns
   """
-  # TODO: confirm the info in pydoc!
   depth: int  # depth of this evaluation
   best: int   # best found move; encoded
   mate: int   # 0 no mate; !=0 position has mate-in-N (==abs(mate)); >0 side to move; <0 opponent
@@ -191,15 +186,21 @@ class PositionEval(TypedDict):
   # AVOID adding stuff here; if you do, change EncodeEval() & DecodeEval() and MIGRATE THE DB!!
 
 
+# convert a PositionEval into a string of 4 ','-separated hex ints
 EncodeEval: Callable[[PositionEval], str] = lambda e: ','.join(
-    hex(e[k])[2:] for k in ('depth', 'best', 'mate', 'score'))
+    f'{e[k]:x}' for k in ('depth', 'best', 'mate', 'score'))
 
 
 def DecodeEval(evaluation: str) -> PositionEval:
-  """Decode position evaluation from ','-separated hex."""
+  """Decode position evaluation from ','-separated hex into a PositionEval."""
   depth, best, mate, score = evaluation.split(',')
   return PositionEval(
       depth=int(depth, 16), best=int(best, 16), mate=int(mate, 16), score=int(score, 16))
+
+
+# convert a chess.Move into an integer we can use to index our dictionaries
+EncodePly: Callable[[chess.Move], int] = lambda m: (
+    m.from_square * 100 + m.to_square + (m.promotion * 1000000 if m.promotion else 0))
 
 
 def DecodePly(ply: int) -> chess.Move:
@@ -642,7 +643,7 @@ class PGNData:
       self._conn.execute("""
           INSERT INTO positions (position_hash, flags, extras, game_hashes)
           VALUES (?, ?, ?, ?)
-      """, (str(position_hash), flags.value, hex(extras.value)[2:],
+      """, (str(position_hash), flags.value, f'{extras.value:x}',
             game_hash if game_hash else None))
       return True
     # we already have this position, so we check if flags are consistent and add headers, if any
@@ -652,7 +653,7 @@ class PGNData:
     # add extra flags
     row_changed = False
     existing_extras_set: set[str] = set(row[1].split(','))
-    if (new_extra := hex(extras.value)[2:]) not in existing_extras_set:
+    if (new_extra := f'{extras.value:x}') not in existing_extras_set:
       existing_extras_set.add(new_extra)
       row_changed = True
     # add extra hashes, if needed
@@ -704,7 +705,7 @@ class PGNData:
     self._conn.execute("""
         INSERT OR IGNORE INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
         VALUES(?, ?, ?, ?, ?)
-    """, (game_hash, str(end_position_hash), ','.join(hex(p)[2:] for p in game_plys),
+    """, (game_hash, str(end_position_hash), ','.join(f'{p:x}' for p in game_plys),
           json.dumps(game_headers), 0))
 
   def _InsertErrorGame(
