@@ -11,9 +11,12 @@ import hashlib
 import io
 import json
 import logging
+import multiprocessing
+import multiprocessing.queues
 import os
 import os.path
 # import pdb
+import queue
 import sqlite3
 import tempfile
 import time
@@ -42,6 +45,19 @@ _PGN_CACHE_FILE: str = os.path.join(_PGN_CACHE_DIR, 'cache.bin')
 _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
 _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 
+# tactical constants
+SOFT_PLY_LIMIT: int = 40  # games with >= ply depth than this are easier to declare duplicates
+HARD_PLY_LIMIT: int = 55  # games with >= ply depth than this are always considered duplicates
+ELO_CATEGORY_TO_PLY: dict[str, int] = {  # ply depth search for STOCKFISH VERSION 17+
+    'club': 4,    # club player
+    'expert': 8,
+    'master': 12,
+    'im': 14,     # international master
+    'gm': 16,     # grandmaster
+    'world': 18,  # world champion
+    'super': 20,  # super-human
+}
+
 # useful
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
 STANDARD_CHESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
@@ -59,6 +75,9 @@ _EMPTY_HEADER_VALUES: set[str] = {
     'n/a', 'unknown', 'none', 'no',
     'no date', 'no name', 'no event',
 }
+_WORKER_THREADS: int = 8               # number of worker threads to spawn
+_WORKER_TIMEOUT_SECONDS: float = 10.0  # seconds until a worker is considered timed-out
+_WORKER_SENTINEL_MESSAGE: str = '-'
 
 # make player names "Doe, John" -> "john doe"
 _NormalizeNames: Callable[[str], str] = lambda n: (
@@ -161,9 +180,6 @@ _RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
     _BLACK_WIN_PGN: BLACK_WIN,
     _DRAW_PGN: DRAWN_GAME,
 }
-
-# at what ply depth should we be more lax with game comparisons?
-_PLY_LAX_COMPARISON_DEPTH: int = 40  # i.e., if game is beyond 20th move and is much less likely to repeat
 
 
 class PositionEval(TypedDict):
@@ -406,44 +422,153 @@ def _FixGameResultHeaderOrRaise(
   raise InvalidGameError('Game has no recorded result and no clear end', ErrorGameCategory.ENDING_ERROR)
 
 
-# TODO: implement multithreaded workers that will, for each "node" (FEN) stockfish-eval the position
 def FindBestMove(
-    fen: str, depth: int = 20, engine_path: str = 'stockfish') -> tuple[chess.Move, PositionEval]:
+    fen: str,
+    depth: int = ELO_CATEGORY_TO_PLY['super'],
+    engine_path: str = 'stockfish',
+    engine_obj: Optional[chess.engine.SimpleEngine] = None) -> tuple[chess.Move, PositionEval]:
   """Finds the best move for a position (FEN) up to a depth.
 
   Args:
     fen: FEN string to use
-    depth: (default 20) ply depth to search
+    depth: (default 20 = ELO_CATEGORY_TO_PLY['super']) ply depth to search
     engine_path: (default 'stockfish') the engine path to invoke
+    engine_obj: (default None) a open chess.engine.SimpleEngine; if given skips creation/engine_path
 
   Returns:
     (best_move, PositionEval), where best_move is a chess.Move and see PositionEval for details
   """
   if depth < 5:
     raise ValueError('Chess engine depth must be 5 or larger')
-  # open Stockfish in UCI mode
-  with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-    # ask for an analysis from engine
-    info: chess.List[chess.engine.InfoDict] = engine.analyse(
-        chess.Board(fen),
-        limit=chess.engine.Limit(depth=depth),
-        info=chess.engine.INFO_ALL,  # to get full data
-        multipv=1  # We only want the single best line
-    )
-    # check the result is as expected; best move is first move of best line
-    if len(info) != 1 or not info[0].get('pv', None) or not info[0].get('score', None):
-      raise RuntimeError(f'No principal variation or score returned by engine for FEN: {fen!r}')
-    best_move: chess.Move = info[0]['pv'][0]  # type:ignore
-    # check if the engine sees a forced mate from the current position
-    mate_in: int = 0
-    relative_score: chess.engine.Score = info[0]['score'].relative  # type:ignore
-    if relative_score.is_mate() and (n_mate := relative_score.mate()):
-      # mate_in > 0 => side to move is mating in n_mate moves
-      # mate_in < 0 => the opponent is mating in abs(n_mate) moves
-      mate_in = n_mate
-    score: Optional[int] = relative_score.score()
-    return (best_move, PositionEval(
-        depth=depth, best=EncodePly(best_move), mate=mate_in, score=0 if score is None else score))
+  # ask for an analysis from engine
+  engine_info: chess.List[chess.engine.InfoDict]
+  if engine_obj:
+    # call engine: INFO_ALL is to get full data; multipv=1 means only the single best line
+    engine_info = engine_obj.analyse(
+        chess.Board(fen), limit=chess.engine.Limit(depth=depth),
+        info=chess.engine.INFO_ALL, multipv=1)
+  else:
+    # open Stockfish/engine in UCI mode
+    with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+      engine_info = engine.analyse(
+          chess.Board(fen), limit=chess.engine.Limit(depth=depth),
+          info=chess.engine.INFO_ALL, multipv=1)
+  # check the result is as expected; best move is first move of best line
+  if (len(engine_info) != 1 or
+      not engine_info[0].get('pv', None) or
+      not engine_info[0].get('score', None)):
+    raise RuntimeError(f'No principal variation or score returned by engine for FEN: {fen!r}')
+  best_move: chess.Move = engine_info[0]['pv'][0]  # type:ignore
+  # check if the engine sees a forced mate from the current position
+  mate_in: int = 0
+  relative_score: chess.engine.Score = engine_info[0]['score'].relative  # type:ignore
+  if relative_score.is_mate() and (n_mate := relative_score.mate()):
+    # mate_in > 0 => side to move is mating in n_mate moves
+    # mate_in < 0 => the opponent is mating in abs(n_mate) moves
+    mate_in = n_mate
+  score: Optional[int] = relative_score.score()
+  return (best_move, PositionEval(
+      depth=depth, best=EncodePly(best_move), mate=mate_in, score=0 if score is None else score))
+
+
+def _WorkerProcessEvalTask(
+    worker_n: int, tasks: multiprocessing.queues.Queue,  # type:ignore
+    depth: int, engine_path: str, timeout: float) -> None:
+  """Worker function that runs in a separate process or thread to evaluate chess positions."""
+  if not worker_n or not tasks or not engine_path:
+    raise ValueError('Empty parameters!')
+  if depth < ELO_CATEGORY_TO_PLY['club']:
+    raise ValueError(f'ply depth should be at least {ELO_CATEGORY_TO_PLY["club"]}')
+  # local connection: each thread must have it own
+  fen: str
+  p_hash: str
+  p_eval: PositionEval
+  db = PGNData()
+  try:
+    # only once: open Stockfish/engine in UCI mode, also open a log file in _PGN_DATA_DIR
+    with (chess.engine.SimpleEngine.popen_uci(engine_path) as engine,
+          open(os.path.join(_PGN_DATA_DIR, f'worker-{worker_n}.logs'),
+               'wt+', encoding='utf-8') as file_obj):
+      # main loop: pick up a task and execute it
+      file_obj.write(f'Starting worker thread #{worker_n}')
+      while True:
+        try:
+          p_hash = tasks.get(timeout=timeout)  # type:ignore
+        except queue.Empty:
+          file_obj.write(f'Worker #{worker_n} timed out, no tasks available. Exiting.')
+          break
+        if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
+          file_obj.write('Worker #{worker_n} received sentinel, exiting.')
+          break
+        # we have a task: evaluate and save
+        position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
+        fen = db.PositionHashToFEN(position)[0]
+        p_eval = FindBestMove(fen, depth, engine_obj=engine)[1]
+        db.UpdatePositionEvaluation(position, p_eval)
+        file_obj.write(f'{p_hash} ({fen}) => {p_eval!r}\n')
+        file_obj.flush()
+  finally:
+    db.Close()
+
+
+def RunEvalWorkers(
+    num_workers: int, tasks: set[str],
+    depth: int = ELO_CATEGORY_TO_PLY['super'], engine_path: str = 'stockfish',
+    timeout: float = _WORKER_TIMEOUT_SECONDS) -> None:
+  """Spawns multiple worker processes to process list of (fen_string, position_hash) tasks.
+
+  Each worker calls WorkerProcessEvalTask(...) in a new process.
+
+  Args:
+    num_workers: number of worker threads
+    depth: (default 20 = ELO_CATEGORY_TO_PLY['super']) ply depth to search
+    engine_path: (default 'stockfish') the engine path to invoke
+    timeout: (default _WORKER_TIMEOUT_SECONDS) seconds until worker timeout
+  """
+  eval_queue: multiprocessing.queues.Queue = multiprocessing.Queue()  # type:ignore
+  for position in tasks:
+    eval_queue.put(position)  # type:ignore
+  logging.info('Enqueued %d positions for engine evaluation', len(tasks))
+  # create worker processes
+  processes: list[multiprocessing.Process] = []
+  for i in range(num_workers):
+    worker_thread = multiprocessing.Process(
+        target=_WorkerProcessEvalTask,                          # type:ignore
+        args=(i + 1, eval_queue, depth, engine_path, timeout))  # type:ignore
+    worker_thread.start()
+    processes.append(worker_thread)
+  logging.info('Spawned %d engine eval workers with depth %d', num_workers, depth)
+  # wait for them to finish or do something else
+  for p in processes:
+    p.join(timeout)
+    if p.is_alive():
+      # force the sentinel so they can exit
+      eval_queue.put(_WORKER_SENTINEL_MESSAGE)  # type:ignore
+  # re-join them
+  for p in processes:
+    p.join(timeout)
+  logging.info('All engine eval workers done')
+
+
+def AddEvaluationsOfRepeatPositionsToDB() -> None:
+  """Adds engine evaluations of repeat positions to chess DB. Multithreaded and efficient."""
+  # get and display the numbers we will be sending to the engine
+  result: dict[int, dict[str, dict[int, str]]] = PGNData().GetPositionsWithMultipleBranches(
+      filter_engine_done=False)
+  print()
+  print('Found the following counts of repeated positions without engine evaluations:')
+  print()
+  n_total: int = 0
+  for n in sorted(result.keys(), reverse=True):
+    n_per_count: int = len(result[n])
+    n_total += n_per_count
+    print(f'  Branching into {n} moves: {n_per_count} positions')
+  print()
+  print(f'Total: {n_total} positions')
+  print()
+  for n in sorted(result.keys(), reverse=True):
+    per_count: dict[str, dict[int, str]] = result[n]
+    RunEvalWorkers(_WORKER_THREADS, set(per_count), timeout=_WORKER_TIMEOUT_SECONDS)
 
 
 def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
@@ -513,9 +638,6 @@ class PGNCache:
 
 class PGNData:
   """A PGN Database for Pawnalyze using SQLite."""
-
-  _SOFT_PLY_LIMIT: int = 40
-  _HARD_PLY_LIMIT: int = 55
 
   _TABLE_ORDER: list[str] = [
       'positions', 'games', 'duplicate_games', 'moves',
@@ -685,12 +807,13 @@ class PGNData:
             None if row[2] is None else DecodeEval(row[2]),
             set() if row[3] is None else set(row[3].split(',')))
 
-  def _UpdatePositionEvaluation(
+  def UpdatePositionEvaluation(
       self, position_hash: pawnzobrist.Zobrist, evaluation: PositionEval) -> None:
     """Update a position setting its engine evaluation. Position must exist previously."""
-    self._conn.execute(
-        'UPDATE positions SET engine = ? WHERE position_hash = ?',
-        (EncodeEval(evaluation), str(position_hash)))
+    with self._conn:
+      self._conn.execute(
+          'UPDATE positions SET engine = ? WHERE position_hash = ?',
+          (EncodeEval(evaluation), str(position_hash)))
 
   def _InsertParsedGame(
       self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
@@ -804,6 +927,87 @@ class PGNData:
     """, (str(position_hash),))
     return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
 
+  def GetPositionsWithMultipleBranches(
+      self, filter_engine_done: bool = False) -> dict[int, dict[str, dict[int, str]]]:
+    """Find `moves` with >1 ply in them as {len_plys, {from_position_hash: {ply: to_position_hash}}}."""
+    with self._conn:
+      if filter_engine_done:
+        cursor: sqlite3.Cursor = self._conn.execute("""
+            SELECT m.from_position_hash, m.ply, m.to_position_hash
+            FROM moves AS m
+            JOIN positions AS p ON p.position_hash = m.from_position_hash
+            WHERE p.engine IS NULL
+              AND m.from_position_hash IN (
+                SELECT from_position_hash
+                FROM moves
+                GROUP BY from_position_hash
+                HAVING COUNT(*) > 1
+              )
+        """)
+      else:
+        cursor: sqlite3.Cursor = self._conn.execute("""
+            SELECT from_position_hash, ply, to_position_hash
+            FROM moves
+            WHERE from_position_hash IN (
+              SELECT from_position_hash
+              FROM moves
+              GROUP BY from_position_hash
+              HAVING COUNT(*) > 1
+            )
+        """)
+    # first gather from_position_hash -> {ply: to_position_hash}
+    node_map: dict[str, dict[int, str]] = {}
+    for f_h, ply, t_h in cursor:  # stream cursor
+      plys: dict[int, str] = node_map.setdefault(f_h, {})
+      plys[ply] = t_h
+    # group them by the count of distinct plies
+    result: dict[int, dict[str, dict[int, str]]] = {}
+    for f_h, plys in node_map.items():
+      branch_count: int = len(plys)  # how many different plies from this position
+      if not plys or branch_count < 2:
+        raise ValueError('Query should never return a row with only one ply')
+      result.setdefault(branch_count, {})[f_h] = plys
+    return result
+
+  def PositionHashToFEN(
+      self, position_zob: pawnzobrist.Zobrist) -> tuple[str, chess.Board, list[int]]:
+    """Reconstruct a FEN string for the given `position_hash`. Returns None if no path to root."""
+    # if this is already the starting position, return the standard FEN directly
+    start_hash = str(STARTING_POSITION_HASH)
+    board = chess.Board(STANDARD_CHESS_FEN)
+    position_hash = str(position_zob)
+    if position_hash == start_hash:
+      return (STANDARD_CHESS_FEN, board, [])
+    # trace backwards through `moves` until we reach STARTING_POSITION_HASH
+    reverse_moves: list[int] = []  # moves in backward order from the target up to the start
+    current_hash: str = position_hash
+    visited: set[str] = set()
+    while current_hash != start_hash:
+      if current_hash in visited:
+        raise RuntimeError(f'Detected cycle or repeated position: {position_hash}/{current_hash}')
+      visited.add(current_hash)
+      # find a row in `moves` where `to_position_hash == current_hash`
+      row: Optional[tuple[str, int]] = self._conn.execute(
+          'SELECT from_position_hash, ply FROM moves WHERE to_position_hash = ? LIMIT 1',
+          (current_hash,)).fetchone()
+      if not row:
+        raise RuntimeError(f'No parent found: {position_hash}/{current_hash}')
+      from_hash, ply_int = row
+      reverse_moves.append(ply_int)
+      current_hash = from_hash
+    # apply those moves forward from a fresh board
+    actual_moves: list[int] = reverse_moves[::-1]
+    for ply_int in actual_moves:
+      move: chess.Move = DecodePly(ply_int)
+      if not board.is_legal(move):
+        raise RuntimeError(f'Illegal move reconstructing {position_hash}: {move}, {board.fen()}')
+      board.push(move)
+    # the resulting board should match the `position_hash`, so check!
+    board_hash: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(board)
+    if position_hash != str(board_hash):
+      raise RuntimeError(f'Position mismatch {position_hash}: {str(board_hash)}, {board.fen()}')
+    return (board.fen(), board, actual_moves)
+
   def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[str, int, int]:
     """Loads game into database. Returns (game_hash, plys, new_positions)."""
     # get game_hash and check if we already know this exact game PGN
@@ -865,18 +1069,12 @@ class PGNData:
         logging.warning('%s\n%r', str(err), original_pgn)
       return (game_hash, 0, 0)
 
-  def DeduplicateGames(
-      self, soft_ply_threshold: int = _SOFT_PLY_LIMIT,
-      hard_ply_threshold: int = _HARD_PLY_LIMIT) -> list[dict[str, Any]]:
+  def DeduplicateGames(self) -> list[dict[str, Any]]:
     """Deduplicate games.
 
     Finds positions in `positions` table that have multiple game_hashes and attempts
     to identify duplicates among those games. Duplicates are recorded in `duplicate_games`
     (and optionally removed from `games` if not in dry_run mode).
-
-    Args:
-      ply_threshold: The minimal number of plys above which two games are almost certainly
-                    the same (if they share an end position). E.g., 40 or 60.
 
     Returns:
       A list of “unified header info” records produced by merging duplicates. Each
@@ -930,8 +1128,7 @@ class PGNData:
           if gh_b in visited:
             continue
           # Step 2b: decide if these two are duplicates
-          if self._IsDuplicateGame(
-              plys_a, head_a, plys_b, head_b, soft_ply_threshold, hard_ply_threshold):
+          if self._IsDuplicateGame(plys_a, head_a, plys_b, head_b, SOFT_PLY_LIMIT, HARD_PLY_LIMIT):
             visited.add(gh_b)
             group.add(gh_b)
             # unify these headers

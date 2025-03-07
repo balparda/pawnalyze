@@ -223,6 +223,68 @@ In conclusion, both data and theory indicate that as ply depth increases, the li
 
 Sources: Real-world chess database statistics (Lichess, ChessBase) and academic analyses were used to support these conclusions. For example, ChessBase reports thousands of instances of identical short games ￼, while Stack Exchange and Chess.com discussions have documented the rare cases of long move-sequence overlaps ￼ ￼. Theoretical values like the ~10^123 game complexity and ~35 average branching factor come from computational chess research ￼ ￼. These empirical and theoretical sources collectively illustrate how game convergence behavior changes with ply depth, from frequent overlap in openings to almost guaranteed divergence (or eventual merging into known endgames) by the time we reach the deeper plies of a chess game.
 
+## Stockfish 17 Ply Depth vs. Estimated Elo Strength (Classical Chess)
+
+Understanding how search depth translates to playing strength can help gauge what rating level a depth-limited Stockfish 17 is emulating. “Depth” here refers to plies (half-moves) the engine searches ahead – e.g. depth 8 means it looks 8 plies (4 moves by each side) into the future ￼. By fixing the depth (using chess.engine.Limit(depth=X)), we can handicap Stockfish’s foresight and approximate human skill levels, since deeper search generally means stronger play.
+
+### How Ply Depth Affects Playing Strength
+
+* Shallow depth (low plies) – The engine sees only short tactical sequences. It will handle one-move tactics and obvious material wins, but miss deeper combinations or long-term positional plans. This often leads to moves that look good immediately but backfire a few moves later (similar to how a novice might grab a pawn and overlook a coming counterattack). For example, at depth 6–7 plies (3-4 moves ahead), Stockfish’s strength is only around strong club player level ￼. It can blunder strategically because it lacks foresight beyond a few moves.
+* Moderate depth – As depth increases, the engine’s tactical horizon extends. At ~10–12 plies (5–6 moves ahead), it begins to play like an expert or master. It can foresee common tactical tricks a few moves out and starts to make more coherent plans. However, some sophisticated positional ideas or very deep tactics may still be missed.
+* High depth (deep search) – With 14+ plies, the engine can see many moves ahead, approaching strong grandmaster caliber. Research indicates a depth around 14–15 plies is needed to match a 2500 Elo grandmaster ￼. At this depth the engine rarely falls for short tactics and has enough lookahead to handle complex middlegame ideas. Its “positional depth” also improves – it can anticipate the long-term consequences of moves (pawn structure changes, outpost creation, etc.) rather than just immediate material gain.
+* Very deep (20+ plies) – Around 18–20 plies, the engine reaches super-GM strength. This is the territory of 2700+ Elo, i.e. world top players. In fact, limiting a strong engine to ~19 plies still yields about 2800+ Elo, essentially world champion level play ￼. Beyond 20 plies, Stockfish surpasses human capabilities entirely – even at fixed depth 20 (which is 10 full moves ahead), its estimated strength is near 2894 Elo, already above any human’s rating ￼. Each additional ply yields diminishing returns but still adds strength; e.g. going from 18 to 19 ply adds roughly ~67 Elo (from ~2761 to ~2828) ￼, which can be the difference between an elite GM and the world #1.
+
+Why does more depth = higher Elo? Each extra ply lets Stockfish see one move further into the tree of possibilities. This dramatically improves tactical foresight – deep combinations or traps that a shallow search would miss become visible. It also means the engine can carry out multi-move strategic plans (like maneuvering pieces to ideal squares over several turns) and correctly evaluate outcomes that occur many moves later. In essence, a higher fixed depth reduces the engine’s “blind spot” and aligns its move choices more with what a stronger human would find after long calculation. Empirically, self-play experiments have shown on the order of 50–70 Elo gain per additional ply in the mid-range depths ￼. Notably, the gain per depth can be even larger at very low depths – the gap from 1-ply to 2-ply is huge because a 1-ply engine is nearly blind to responses ￼. As depth increases, the Elo gains gradually taper (forming a sigmoid curve ￼ ￼), reflecting diminishing returns at super-human levels.
+
+### Previous Research on Depth vs. Rating
+
+A well-known study by Diogo Ferreira (2013) analyzed how a fixed-depth engine’s moves compare to human play. By anchoring a top engine’s depth-20 strength to roughly  GM level, he extrapolated ratings for other depths ￼ ￼. The findings (for Houdini 1.5, a strong engine of that era) are illuminating:
+
+* Club player (~1500–2000 Elo): Achieved at shallow depths around 6–7 plies ￼. In fact, depth 6 was estimated around ~1966 Elo and depth 7 ~2033 Elo ￼ – roughly the strength of a typical club amateur or local tournament player. This suggests even a few plies of lookahead give the engine solid basics (it won’t hang pieces outright and can spot one-move threats), mimicking strong amateur play.
+* Master (2200+ Elo): Around 10–12 plies. For instance, depth 10 was ~2231 Elo and depth 12 ~2364 Elo ￼ – in the range of an expert/Candidate Master to low-end Master. By this depth, the engine has enough calculation to beat most amateurs consistently, similar to a human master who calculates 5-6 moves deep in critical lines.
+* International Master/Grandmaster (2400–2500 Elo): About 13–14 plies deep. Depth 14 was pegged near 2496 Elo ￼, essentially Grandmaster level, and depth 13 about 2430 (IM level). Ferreira notes that to match a GM’s strength (2500 Elo), the engine needed to search “above 14 plies” ￼. In other words, a Grandmaster’s quality of play corresponds to looking roughly 7 moves ahead with perfect tactical accuracy.
+* Super-GM (2700 Elo): Around 17–18 plies. Depth 17 was ~2695 Elo and depth 18 ~2761 Elo ￼, closing in on top 10 players in the world. At 18 plies the engine is playing at the level of an elite grandmaster (it sees 9 moves ahead, which covers most complex tactics a human could find in long think).
+* World Champion (2800+ Elo): Reached by ≈19 plies. Depth 19 scored about 2828 Elo ￼, crossing the 2800 mark. This is comparable to world champion-level performance (for reference, Magnus Carlsen’s FIDE rating has been in the 2820–2850 range). Depth 20 was ~2894 Elo ￼, already beyond any human – effectively “super-human” play. So somewhere between 18–20 ply depth, the engine’s play transitions from human World Champion level to clearly stronger than any human.
+
+These numbers come from one study (anchored to Houdini’s depth-20 ≈ 2894 Elo self-estimate ￼ ￼). They should be taken as approximate, but they offer a reasonable scaling. Crucially, they illustrate that each additional ply dramatically boosts strength in the lower range (engine from ~1800 to 2500 Elo as depth goes 6→14) and still gives ~50–70 Elo per ply even at GM-level depth ￼ ￼.
+
+Note on Stockfish 17: Stockfish 17 is even stronger per ply than the older engines used in those studies. Its improved evaluation (especially with NNUE neural networks) means it makes better decisions with less search. In practice, Stockfish 17 reaching depth X may play stronger than Houdini 1.5 did at the same depth. For example, Stockfish’s developers note it finds high-quality moves faster and gains around ~45 Elo over Stockfish 16 ￼; over many generations, Stockfish has gained hundreds of Elo, which effectively means a depth-limited SF17 might outperform an older engine of equal depth. However, for estimating Elo, we can use the same depth≈Elo trend, since the pattern of improvement with depth is similar – we’ll just treat the Elo figures as Stockfish 17’s strength at that fixed depth. (If anything, SF17 might hit a given Elo at slightly fewer plies than listed, but the difference isn’t huge in the context of this high-level analysis.)
+
+Also note that depth is not the only factor in engine strength – things like knowledge, evaluation heuristics, and multi-threading matter. Here we ignore hardware and threads (assuming a single thread and that depth is the hard cap) so that depth is the sole variable. In real use, two engines at “depth 20” could differ if one evaluates positions more wisely. Stockfish’s NNUE gives it a knowledge advantage even at low depth, which is partly why it’s so strong. But depth-limited self-play matches on modern Stockfish still show a similar Elo progression – you can roughly subtract ~60 Elo for each ply reduction in the 10–20 ply range ￼.
+
+### Estimated Elo for Stockfish 17 by Depth
+
+Below is a table mapping various fixed search depths (in plies) to an estimated Elo rating for Stockfish 17 in classical play. This assumes Stockfish always searches to that exact depth for each move (no deeper), and uses its strongest evaluation. The “Human level” column gives a rough equivalence to human ratings/titles:
+
+Depth (plies)	Est. Elo (classical)	Approx. Human Level
+1  (0.5 moves each)	~1600 ￼ (est.)	Casual club player (beginner/intermediate)
+2	~1700 (est.)	Casual club player
+3	~1770 (est.)	Intermediate club player
+4	~1830 (est.)	Club player
+5	~1900 (est.)	Strong club player
+6	1966 ￼	Club/County-level strong amateur
+7	2033 ￼	Class A / Expert (~2000 Elo)
+8	2099 ￼	Class A / Expert
+9	2165 ￼	Candidate Master (~2200-)
+10	2231 ￼	Candidate Master / Master (~2200)
+12	2364 ￼	FIDE Master (~2300-2400)
+14	2496 ￼	International Master / low GM (~2500)
+15	2563 ￼	Grandmaster (2500+ level)
+16	2629 ￼	Grandmaster (2600+ GM)
+17	2695 ￼	Super-GM (2700- level)
+18	2761 ￼	Super-GM (2700+ elite)
+19	2828 ￼	World Champion caliber (~2800+)
+20	2894 ￼	Super-human (beyond human)
+22 (extrap.)	~3025 (extrapolated)	Super-human (far beyond human)
+
+Notes:
+
+* Depths 1–5 Elo estimates are extrapolated (linear scaling ~66 Elo/ply) from research data ￼, since the study’s self-play data started at depth 6. In practice, a 1-ply engine is extremely weak and prone to blunders a human ~1600 might avoid – so 1600 Elo for depth=1 is a rough guess. It means the engine would still win some games versus a beginner by virtue of basic material evaluation, but it will drop pieces to any multi-move trap. Each additional ply from 1 to 5 yields a huge strength jump (e.g. depth 4 ~1830 Elo vs depth 1 ~1636 Elo in one analysis ￼). The Elo gap per ply increases at very low depths ￼, so the entries for 1–3 plies are very approximate.
+* From depth 6 onward, the figures in the table are based on Ferreira’s data (Houdini engine) ￼, which should be in the right ballpark for Stockfish 17 as well. Stockfish 17’s stronger evaluation might make it slightly better than these numbers at each depth, but likely within a few dozen Elo. For example, depth 14 is ~2496 Elo (strong IM/GM) in that study; Stockfish 17 at 14 ply might perform a bit above 2500 Elo due to improved positional play. The overall trend (≈ 2500 Elo at ~14 ply, 2800 Elo at ~19 ply) should hold.
+* By depth 18–20, Stockfish reaches and exceeds human limits. Around 18 plies (~2760 Elo) it’s playing at top grandmaster level. At 20 plies (~2890 Elo) it is already stronger than the world champion by a significant margin ￼. For context, Lichess’s AI level 8 (which uses Stockfish at near max strength) is capped around depth 22 and is roughly 2800+ Elo in practice ￼ – consistent with the table above that even a depth-19 engine is ~2828 Elo. In other words, a depth-20 Stockfish would comfortably beat any human in a match. If you allowed still deeper searches (depth 22, 24, etc.), the Elo would continue to climb (depth 22 is projected over 3000). However, there are diminishing returns – engines gain less Elo per ply at super-human levels, and other factors (like perfect endgame tablebases or positional knowledge) start to matter more. Some researchers estimate current top engines might asymptotically peak around ~4000 Elo given infinite depth or compute ￼, meaning there is a limit to how much pure depth can yield in Elo.
+
+World Champion Level: In summary, Stockfish 17 needs on the order of 18–19 plies of depth (fixed-depth search) to play at world champion strength (~2800 Elo). At those depths it demonstrates deep tactical foresight (calculation 9-10 moves ahead with near-perfect accuracy) and strong positional judgment, equivalent to the best human players. Lower depth settings correspond to progressively lower ratings – e.g. ~2500 at 14 ply (strong GM), ~2200 at 10 ply (master), ~1800 at 4-6 ply (club level). These mappings show how limiting the engine’s search depth handicaps its play: each reduction in depth is like subtracting a few hundred Elo, making the engine more “human” and prone to the kind of mistakes or oversights typical at that rating. Conversely, as depth increases, Stockfish’s play quickly surpasses human capabilities, underlining the value of deep calculation and lookahead in chess strength.
+
 ## Contributing
 
 Contributions are welcome! Please submit issues or pull requests on GitHub.
