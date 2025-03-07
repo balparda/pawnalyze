@@ -554,7 +554,7 @@ def AddEvaluationsOfRepeatPositionsToDB() -> None:
   """Adds engine evaluations of repeat positions to chess DB. Multithreaded and efficient."""
   # get and display the numbers we will be sending to the engine
   result: dict[int, dict[str, dict[int, str]]] = PGNData().GetPositionsWithMultipleBranches(
-      filter_engine_done=False)
+      filter_engine_done=True)
   print()
   print('Found the following counts of repeated positions without engine evaluations:')
   print()

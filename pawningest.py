@@ -18,7 +18,7 @@ import argparse
 import logging
 import os
 import os.path
-import pdb
+# import pdb
 from typing import Optional
 
 from baselib import base
@@ -212,11 +212,6 @@ def Main() -> None:
     database: Optional[pawnlib.PGNData] = None if db_readonly else pawnlib.PGNData()
     try:
       # execute the source reads
-
-      pawnlib.AddEvaluationsOfRepeatPositionsToDB()
-      return
-
-
       print()
       with base.Timer() as op_timer:
         if url:
