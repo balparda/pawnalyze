@@ -76,8 +76,6 @@ _EMPTY_HEADER_VALUES: set[str] = {
     'n/a', 'unknown', 'none', 'no',
     'no date', 'no name', 'no event',
 }
-_WORKER_THREADS: int = 8               # number of worker threads to spawn
-_WORKER_TIMEOUT_SECONDS: float = 10.0  # seconds until a worker is considered timed-out
 _WORKER_SENTINEL_MESSAGE: str = '-'
 
 # make player names "Doe, John" -> "john doe"
@@ -537,9 +535,8 @@ def _WorkerProcessEvalTask(
 
 
 def RunEvalWorkers(
-    num_workers: int, tasks: set[str],
-    depth: int = ELO_CATEGORY_TO_PLY['super'], engine_path: str = 'stockfish',
-    timeout: float = _WORKER_TIMEOUT_SECONDS) -> None:
+    num_workers: int, tasks: list[str], timeout: float,
+    depth: int = ELO_CATEGORY_TO_PLY['super'], engine_path: str = 'stockfish') -> None:
   """Spawns multiple worker processes to process list of (fen_string, position_hash) tasks.
 
   Each worker calls WorkerProcessEvalTask(...) in a new process.
@@ -564,7 +561,7 @@ def RunEvalWorkers(
     processes.append(worker_thread)
   logging.info('Spawned %d engine eval workers with depth %d', num_workers, depth)
   # wait for them to finish or do something else
-  for p in processes:
+  for p in processes:  # TODO: change to progressbar based on qsize()
     p.join(timeout)
     if p.is_alive():
       # force the sentinel so they can exit
@@ -573,27 +570,6 @@ def RunEvalWorkers(
   for p in processes:
     p.join(timeout)
   logging.info('All engine eval workers done')
-
-
-def AddEvaluationsOfRepeatPositionsToDB() -> None:
-  """Adds engine evaluations of repeat positions to chess DB. Multithreaded and efficient."""
-  # get and display the numbers we will be sending to the engine
-  result: dict[int, dict[str, dict[int, str]]] = PGNData().GetPositionsWithMultipleBranches(
-      filter_engine_done=True)
-  print()
-  print('Found the following counts of repeated positions without engine evaluations:')
-  print()
-  n_total: int = 0
-  for n in sorted(result.keys(), reverse=True):
-    n_per_count: int = len(result[n])
-    n_total += n_per_count
-    print(f'  Branching into {n} moves: {n_per_count} positions')
-  print()
-  print(f'Total: {n_total} positions')
-  print()
-  for n in sorted(result.keys(), reverse=True):
-    per_count: dict[str, dict[int, str]] = result[n]
-    RunEvalWorkers(_WORKER_THREADS, set(per_count), timeout=_WORKER_TIMEOUT_SECONDS)
 
 
 def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
