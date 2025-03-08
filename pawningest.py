@@ -5,13 +5,31 @@
 #
 """Pawnalyze ingest PGNs.
 
-Typical examples:
+pawningest.py
 
-./pawningest.py -u "https://ndownloader.figstatic.com/files/6971717"
-(read the URL and ingest these games --- expects a zipped file)
+This module ingests PGN files (from a URL, local file, or directory) into the
+Pawnalyze SQLite database. It can also print games without saving them if run
+in read-only mode.
 
-./pawningest.py -u "https://ndownloader.figstatic.com/files/6971717" -r 1
-(print all the games in the URL but don't add them to the DB)
+Typical usage:
+  ./pawningest.py -u "https://ndownloader.figstatic.com/files/6971717"
+    - Downloads the PGN file from the given URL (zipped or 7z),
+      parses it, and loads it into the Pawnalyze DB.
+
+  ./pawningest.py -f /path/to/local/games.pgn
+    - Reads a local .pgn file and loads it into the DB.
+
+  ./pawningest.py -d /path/to/pgnfiles/
+    - Recursively reads all .pgn files in the directory
+      and ingests them.
+
+Optional arguments:
+  -r/--readonly : If set to True, parse and print but do not save to the DB.
+  -i/--ignorecache : If True, do not check or store the PGN cache; always re-download.
+  -s/--sources : Named source keys, pulling from a dictionary of known URLs.
+  -u/--url : A direct download link for PGN data.
+  -f/--file : A single local PGN file.
+  -d/--dir : A directory containing multiple PGN files.
 """
 
 import argparse
@@ -89,7 +107,7 @@ def Main() -> None:
       help='local dir to load from (default: empty); if given, overrides -s/--sources flag')
   parser.add_argument(
       '-r', '--readonly', type=bool, default=False,
-      help='If "True" will not save database, will only print (default: False)')
+      help='If "True" will not save database (default: False)')
   parser.add_argument(
       '-i', '--ignorecache', type=bool, default=False,
       help='If "True" will not use cache, will re-download files (default: False)')

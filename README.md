@@ -189,6 +189,57 @@ from database import POSITIONS
 print(POSITIONS[initial_hash])
 ```
 
+## PawnIngest (pawningest.py)
+
+`pawningest.py` is a command-line tool to ingest chess PGN files into the **Pawnalyze** SQLite database.
+You can pull PGNs from:
+
+- **URLs** (zipped or 7z files)
+- **Local files** (`.pgn`)
+- **Directories** containing `.pgn` files
+- **Registered sources** (like `figshare`)
+
+### Usage Examples
+
+```bash
+# Download and ingest from a remote URL
+./pawningest.py -u "https://ndownloader.figstatic.com/files/6971717"
+
+# Load from a local PGN file
+./pawningest.py -f "/path/to/games.pgn"
+
+# Recursively load from a directory
+./pawningest.py -d "/path/to/pgn/files/"
+
+# Read from a known source alias
+./pawningest.py -s figshare
+```
+
+## PawnMaintain (pawnmaintain.py)
+
+`pawnmaintain.py` performs maintenance on the Pawnalyze PGN database, such as **deduplicating** games.
+
+### Usage
+
+```bash
+# Run with default thresholds (soft=40, hard=60), modifying the DB
+./pawnmaintain.py
+```
+
+## PawnEngineMoves (pawnenginemoves.py)
+
+`pawnenginemoves.py` orchestrates the evaluation of **repeat positions** in the Pawnalyze
+database via multiple threads or processes. It identifies positions with multiple
+branching moves (`GetPositionsWithMultipleBranches`) that lack an engine evaluation,
+then runs Stockfish or another UCI engine to compute moves and store the results.
+
+### Usage
+
+```bash
+# Launch with default 8 threads:
+./pawnenginemoves.py
+```
+
 ## Considerations on Chess Game Convergence at Different Ply Depths
 
 ### Ply Depth Beyond Which Games Cannot Remain Independent (Convergence is Inevitable)

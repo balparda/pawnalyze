@@ -5,9 +5,19 @@
 #
 """Pawnalyze add Engine Moves to PGNs.
 
-Typical examples:
+pawnenginemoves.py
 
-./pawnenginemoves.py
+This module spawns threads or processes to evaluate repeat positions in the Pawnalyze
+database using a chess engine. Positions that have multiple branches (i.e., more
+than one move from a single position) and no existing engine evaluation are
+discovered, then fed to worker threads.
+
+Typical usage:
+  ./pawnenginemoves.py
+
+Optional Arguments:
+  -n/--numthreads int : Number of worker threads/processes to launch (default=8)
+  -r/--readonly bool  : If True, do not commit changes to the DB
 """
 
 import argparse
@@ -33,6 +43,7 @@ def AddEvaluationsOfRepeatPositionsToDB(database: pawnlib.PGNData, num_threads: 
   print()
   print('Found the following counts of repeated positions without engine evaluations:')
   print()
+  # TODO: inject readonly into workers
   all_jobs: list[str] = []
   for n in sorted(result.keys(), reverse=True):
     n_per_count: int = len(result[n])
@@ -53,10 +64,12 @@ def Main() -> None:
       help=f'Number of worker threads to spawn (default: {_WORKER_THREADS_DEFAULT})')
   parser.add_argument(
       '-r', '--readonly', type=bool, default=False,
-      help='If "True" will not save database, will only print (default: False)')
+      help='If "True" will not save database (default: False)')
   args: argparse.Namespace = parser.parse_args()
   db_readonly = bool(args.readonly)
   num_threads: int = args.numthreads
+  if not 1 <= num_threads <= 32:
+    raise ValueError('Keep number of threads between 1 and 32')
   # start
   print(f'{base.TERM_BLUE}{base.TERM_BOLD}***********************************************')
   print(f'**       {base.TERM_LIGHT_RED}Pawnalyze Add Engine Moves{base.TERM_BLUE}          **')
@@ -70,7 +83,7 @@ def Main() -> None:
       # execute the source reads
       print()
       with base.Timer() as op_timer:
-        logging.info('Starting game DEDUPLICATION')
+        logging.info('Starting evaluation engine')
         AddEvaluationsOfRepeatPositionsToDB(database, num_threads)
       print()
       print(f'Executed in {base.TERM_GREEN}{op_timer.readable}{base.TERM_END}')

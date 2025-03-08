@@ -5,9 +5,19 @@
 #
 """Pawnalyze maintain PGNs Database.
 
-Typical examples:
+pawnmaintain.py
 
-./pawnmaintain.py
+This module performs maintenance tasks on the Pawnalyze SQLite database of PGN
+games. Currently, it focuses on deduplicating game records.
+
+Typical usage:
+  ./pawnmaintain.py
+    - Deduplicates games in the Pawnalyze DB using the default soft/hard ply thresholds (40/60).
+
+Optional arguments:
+  -s/--softlimit N    : Games with ply depth >= N are more likely duplicates.
+  -l/--hardlimit M    : Games with ply depth >= M are always marked duplicates.
+  -r/--readonly bool  : If True, do not commit changes to the database.
 """
 
 import argparse
@@ -21,14 +31,29 @@ __author__ = 'balparda@gmail.com (Daniel Balparda)'
 __version__ = (1, 0)
 
 
+_SOFT_PLY_LIMIT: int = 40  # games with >= ply depth than this are easier to declare duplicates
+_HARD_PLY_LIMIT: int = 60  # games with >= ply depth than this are always considered duplicates
+
+
 def Main() -> None:
   """Main PawnMaintain."""
   # parse the input arguments, do some basic checks
   parser: argparse.ArgumentParser = argparse.ArgumentParser()
   parser.add_argument(
+      '-s', '--softlimit', type=int, default=_SOFT_PLY_LIMIT,
+      help=f'Games with ply depth >= than this are easier to declare duplicates (min/default: {_SOFT_PLY_LIMIT})')
+  parser.add_argument(
+      '-l', '--hardlimit', type=int, default=_HARD_PLY_LIMIT,
+      help=f'Games with ply depth >= than this are always considered duplicates (min/default: {_HARD_PLY_LIMIT})')
+  parser.add_argument(
       '-r', '--readonly', type=bool, default=False,
-      help='If "True" will not save database, will only print (default: False)')
+      help='If "True" will not save database (default: False)')
   args: argparse.Namespace = parser.parse_args()
+  soft_limit: int = args.softlimit
+  hard_limit: int = args.hardlimit
+  if soft_limit < _SOFT_PLY_LIMIT or hard_limit < _HARD_PLY_LIMIT:
+    raise ValueError(
+        f'Minimum soft limit is {_SOFT_PLY_LIMIT} and minimum hard limit is {_HARD_PLY_LIMIT}')
   db_readonly = bool(args.readonly)
   # start
   print(f'{base.TERM_BLUE}{base.TERM_BOLD}***********************************************')
@@ -43,8 +68,9 @@ def Main() -> None:
       # execute the source reads
       print()
       with base.Timer() as op_timer:
-        logging.info('Starting game DEDUPLICATION')
-        database.DeduplicateGames()
+        print(f'Starting game DEDUPLICATION {soft_limit=} / {hard_limit=}')
+        changed_data: int = len(database.DeduplicateGames(soft_limit, hard_limit))
+        print(f'{changed_data} games deduplicated')
       print()
       print(f'Executed in {base.TERM_GREEN}{op_timer.readable}{base.TERM_END}')
       print()

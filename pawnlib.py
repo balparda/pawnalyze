@@ -47,8 +47,6 @@ _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
 _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 
 # tactical constants
-SOFT_PLY_LIMIT: int = 40  # games with >= ply depth than this are easier to declare duplicates
-HARD_PLY_LIMIT: int = 55  # games with >= ply depth than this are always considered duplicates
 ELO_CATEGORY_TO_PLY: dict[str, int] = {  # ply depth search for STOCKFISH VERSION 17+
     'club': 4,    # club player
     'expert': 8,
@@ -256,7 +254,9 @@ def _SplitLargePGN(file_path: str) -> Generator[tuple[list[str], int], None, Non
   with open(file_path, 'rt', encoding='utf-8', errors='replace') as file_in:
     count: int = 0
     line: str = ''
-    for count, line in tqdm.tqdm(enumerate(file_in), desc='Processing', total=total_lines):  # type: ignore
+    for count, line in tqdm.tqdm(  # type: ignore
+        enumerate(file_in), total=total_lines,
+        mininterval=1.0, miniters=100, unit='ln', smoothing=0.8, colour='green'):
       # strip the line and skip if empty
       pgn_line: str = line.strip()  # type: ignore
       if not pgn_line:
@@ -438,6 +438,91 @@ def _FixGameResultHeaderOrRaise(
   raise InvalidGameError('Game has no recorded result and no clear end', ErrorGameCategory.ENDING_ERROR)
 
 
+def _IsDuplicateGame(
+    plys_a: list[int], headers_a: dict[str, str],
+    plys_b: list[int], headers_b: dict[str, str],
+    soft_ply_threshold: int, hard_ply_threshold: int) -> bool:
+  """Decide if game A and game B are duplicates. Returns True if we consider them duplicates.
+
+      1. If both have ply counts >= ply_threshold and share the same ending position, we strongly
+        suspect duplication.
+      2. Compare “soft” player names to see if they match.
+      3. Compare date fields if present and non-trivial.
+
+  Args:
+    plys_a: plys for first game
+    headers_a: headers for first game
+    plys_b: plys for second game
+    headers_b: headers for second game
+    soft_ply_threshold: games with >= ply depth than this are easier to declare duplicates
+    hard_ply_threshold: games with >= ply depth than this are always considered duplicates
+  """
+  # 1) If the length of plys is large, we treat them as duplicates if they share same end pos.
+  #    Actually they do share the same end pos if they're in game_hashes for the same position,
+  #    but let's confirm we do not have error categories or short games.
+  if plys_a != plys_b:
+    return False
+  if len(plys_a) >= hard_ply_threshold:
+    # no game can be considered not a duplicate past the hard_ply_threshold!
+    return True
+  if len(plys_a) >= soft_ply_threshold:
+    # soft compare player names, e.g. "John Doe" vs "Doe, John A"
+    w_a: str = _NormalizePlayer(headers_a.get('white', ''))
+    w_b: str = _NormalizePlayer(headers_b.get('white', ''))
+    if w_a != w_b:
+      return False
+    b_a: str = _NormalizePlayer(headers_a.get('black', ''))
+    b_b: str = _NormalizePlayer(headers_b.get('black', ''))
+    if b_a != b_b:
+      return False
+    # if we get here, we consider them duplicates
+    return True
+  # 2) If both games are short, we treat them as unique unless they have identical date + players
+  #    or other strong match. This is up to your preference.
+  date_a: str = headers_a.get('date', '')
+  date_b: str = headers_b.get('date', '')
+  if date_a and date_a == date_b:
+    # check players again, but be more strict or less strict
+    w_a = _NormalizePlayer(headers_a.get('white', ''))
+    w_b = _NormalizePlayer(headers_b.get('white', ''))
+    b_a = _NormalizePlayer(headers_a.get('black', ''))
+    b_b = _NormalizePlayer(headers_b.get('black', ''))
+    if w_a == w_b and b_a == b_b:
+      return True
+  # otherwise not duplicates
+  return False
+
+
+def _NormalizePlayer(name: str) -> str:
+  """Soft compare approach for player name, ignoring punctuation and
+  reversing 'lastname, firstname' forms, etc."""
+  # all lowercase, remove commas & dots, trim multiple spaces
+  name = name.lower().replace('.', '').strip()
+  # for now just unify to a single spaced string; try to reorder if there's a comma
+  return ' '.join(name.split(', ')[::-1])
+
+
+# TODO: rewrite to take all duplicates and on-the-fly have a merged dict
+# def _MergeGameHeaders(headers_a: dict[str, str], headers_b: dict[str, str]) -> dict[str, str]:
+#   """Unify (new object) 2 headers, adding if no conflict, else merge with '|' delimiter."""
+#   merged: dict[str, str] = dict(headers_a)
+#   for k, v in headers_b.items():
+#     if not v or k == 'issues':
+#       continue
+#     if k not in merged:
+#       merged[k] = v
+#     else:
+#       if (original := merged[k]).lower() != v.lower():
+#         # if they differ, combine them with a pipe
+#         if k == 'result':
+#           # mark result as unknown?
+#           merged['result'] = '*'
+#         else:
+#           merged[k] = f'{merged[k]} | {v}'
+#         merged.setdefault('issues', set()).add(f'{k}: {original!r}/{v!r}')  # type: ignore
+#   return merged
+
+
 def FindBestMove(
     fen: str,
     depth: int = ELO_CATEGORY_TO_PLY['super'],
@@ -506,7 +591,8 @@ def _WorkerProcessEvalTask(
           open(os.path.join(_PGN_DATA_DIR, f'worker-{worker_n}.logs'),
                'at', encoding='utf-8') as file_obj):
       # main loop: pick up a task and execute it
-      file_obj.write(f'Starting worker thread #{worker_n}')
+      file_obj.write(f'Starting worker thread #{worker_n} @ {base.STR_TIME()}')
+      file_obj.flush()
       while True:
         try:
           p_hash = tasks.get(timeout=timeout)  # type:ignore
@@ -523,10 +609,11 @@ def _WorkerProcessEvalTask(
           file_obj.write(
               f'{p_hash} ({fen} @{fen_timer.readable}) => {p_eval!r} @{engine_timer.readable}\n')
         except queue.Empty:
-          file_obj.write(f'Worker #{worker_n} timed out, no tasks available. Exiting.')
+          file_obj.write(
+              f'Worker #{worker_n} timed out, no tasks available. Exiting. @ {base.STR_TIME()}')
           break
         except Exception as err:
-          file_obj.write(f'Worker #{worker_n} exception: {err}')
+          file_obj.write(f'Worker #{worker_n} exception @ {base.STR_TIME()}: {err}')
           raise
         finally:
           file_obj.flush()
@@ -675,6 +762,7 @@ class PGNData:
           CREATE TABLE IF NOT EXISTS duplicate_games (
               game_hash TEXT PRIMARY KEY CHECK (length(game_hash)    = 64),  -- 256 bit SHA-256 hex
               duplicate_of TEXT NOT NULL CHECK (length(duplicate_of) = 64),  -- 256 bit SHA-256 hex
+              game_headers TEXT NOT NULL,       -- JSON dict with game headers
               FOREIGN KEY(duplicate_of) REFERENCES games(game_hash) ON DELETE RESTRICT
           );
       """,
@@ -711,8 +799,9 @@ class PGNData:
       logging.info('Created empty data dir %r', _PGN_DATA_DIR)
     # open DB, create if empty
     exists_db: bool = os.path.exists(_PGN_SQL_FILE)
-    self._conn: sqlite3.Connection = sqlite3.connect(
-        f'file:{_PGN_SQL_FILE}{"?mode=ro" if self._readonly else ""}', uri=True)
+    # self._conn: sqlite3.Connection = sqlite3.connect(
+    #     f'file:{_PGN_SQL_FILE}{"?mode=ro" if self._readonly else ""}', uri=True)
+    self._conn: sqlite3.Connection = sqlite3.connect(_PGN_SQL_FILE)
     self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
     self._known_hashes: Optional[set[str]] = None    # lazy hashes cache
     if exists_db:
@@ -896,25 +985,23 @@ class PGNData:
     return {h[0] for h in cursor}  # stream into set
 
   def _InsertDuplicateGame(
-      self, game_hash: str, duplicate_of: str, remove_from_games: bool = False) -> None:
-    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash.
-
-    Optionally remove from `games` table to save space.
-    """
-    if not self._readonly:
+      self, game_hash: str, duplicate_of: str, game_headers: dict[str, str]) -> None:
+    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash."""
+    if self._readonly:
+      logging.info('new duplicate_games(%s, %s, %r)', game_hash, duplicate_of, game_headers)
+      logging.info('delete games(%s)', game_hash)
+    else:
       self._conn.execute(
-          'INSERT OR IGNORE INTO duplicate_games(game_hash, duplicate_of) VALUES(?, ?)',
-          (game_hash, duplicate_of))
-      # remove from games table, if requested
-      if remove_from_games:
-        self._conn.execute('DELETE FROM games WHERE game_hash = ?', (game_hash,))
+          'INSERT OR IGNORE INTO duplicate_games(game_hash, duplicate_of, game_headers) VALUES(?, ?, ?)',
+          (game_hash, duplicate_of, json.dumps(game_headers)))
+      self._conn.execute('DELETE FROM games WHERE game_hash = ?', (game_hash,))
 
-  def _GetDuplicateGame(self, game_hash: str) -> Optional[str]:
+  def _GetDuplicateGame(self, game_hash: str) -> Optional[tuple[str, dict[str, str]]]:
     """Return duplicate for `game_hash` as hash into `games` table; None if not found."""
     cursor: sqlite3.Cursor = self._conn.execute(
-        'SELECT duplicate_of FROM duplicate_games WHERE game_hash = ?;', (game_hash,))
-    row: Optional[tuple[str]] = cursor.fetchone()  # primary key == game_hash
-    return None if not row else row[0]
+        'SELECT duplicate_of, game_headers FROM duplicate_games WHERE game_hash = ?;', (game_hash,))
+    row: Optional[tuple[str, str]] = cursor.fetchone()  # primary key == game_hash
+    return None if not row else (row[0], json.loads(row[1]))
 
   def _GetDuplicatesOf(self, duplicate_of: str) -> set[str]:
     """Return a set of duplicates `game_hash` for the given actual `game_hash`."""
@@ -1102,12 +1189,17 @@ class PGNData:
         logging.warning('%s\n%r', str(err), original_pgn)
       return (game_hash, 0, 0)
 
-  def DeduplicateGames(self) -> list[dict[str, Any]]:
+  def DeduplicateGames(
+      self, soft_ply_threshold: int, hard_ply_threshold: int) -> list[dict[str, Any]]:
     """Deduplicate games.
 
     Finds positions in `positions` table that have multiple game_hashes and attempts
     to identify duplicates among those games. Duplicates are recorded in `duplicate_games`
     (and optionally removed from `games` if not in dry_run mode).
+
+    Args:
+      soft_ply_threshold: games with >= ply depth than this are easier to declare duplicates
+      hard_ply_threshold: games with >= ply depth than this are always considered duplicates
 
     Returns:
       A list of “unified header info” records produced by merging duplicates. Each
@@ -1147,7 +1239,7 @@ class PGNData:
         potential_games.append((gh, plys_list, game_headers, err_cat))
       # a naive approach: for each pair, check if "IsDuplicateGame(...)" says duplicates
       visited: set[str] = set()
-      duplicates_found: list[tuple[set[str], dict[str, str]]] = []  # [(set_of_hashes, merged_header)]
+      duplicates_found: list[set[str]] = []  # [(set_of_hashes, merged_header)]
       for i in range(len(potential_games)):  # pylint: disable=consider-using-enumerate
         gh_a, plys_a, head_a, _ = potential_games[i]
         if gh_a in visited:
@@ -1155,111 +1247,37 @@ class PGNData:
         visited.add(gh_a)
         # We'll keep "duplicates" for gh_a in one group
         group: set[str] = {gh_a}
-        merged_header = dict(head_a)  # start with first header
         for j in range(i + 1, len(potential_games)):
           gh_b, plys_b, head_b, _ = potential_games[j]
           if gh_b in visited:
             continue
           # Step 2b: decide if these two are duplicates
-          if self._IsDuplicateGame(plys_a, head_a, plys_b, head_b, SOFT_PLY_LIMIT, HARD_PLY_LIMIT):
+          if _IsDuplicateGame(
+              plys_a, head_a, plys_b, head_b, soft_ply_threshold, hard_ply_threshold):
             visited.add(gh_b)
             group.add(gh_b)
-            # unify these headers
-            merged_header: dict[str, str] = self._MergeGameHeaders(merged_header, head_b)
         if len(group) > 1:
-          duplicates_found.append((group, merged_header))
+          duplicates_found.append(group)
       # Step 3: for each group of duplicates found, record them
-      for group, merged_header in duplicates_found:
+      for group in duplicates_found:
         merges_done.append({
             'position_hash': position_hash,
             'duplicate_set': group,
-            'merged_header': merged_header,
         })
-        logging.info('DB merge: %s -> %r', position_hash, merged_header)
         # record duplicates in table 'duplicate_games' for all but the first
         # or whichever logic you want to keep as the “primary”
         temp_group: set[str] = set(group)
         primary_hash: str = temp_group.pop()
         with self._conn:
           for dgh in temp_group:
-            self._InsertDuplicateGame(dgh, primary_hash)  # should we set remove_from_games???????????????????
+            d_game: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
+                                   Optional[str], Optional[str]]] = self._GetGame(dgh)
+            if d_game is None:
+              raise ValueError(f'Duplicate game {dgh!r} not found!')
+            self._InsertDuplicateGame(dgh, primary_hash, d_game[2])
             known_duplicates.add(dgh)  # avoid re-processing
     # end
     return merges_done
-
-  def _IsDuplicateGame(
-      self, plys_a: list[int], headers_a: dict[str, str],
-      plys_b: list[int], headers_b: dict[str, str],
-      soft_ply_threshold: int, hard_ply_threshold: int) -> bool:
-    """Decide if game A and game B are duplicates. Returns True if we consider them duplicates.
-
-        1. If both have ply counts >= ply_threshold and share the same ending position, we strongly
-          suspect duplication.
-        2. Compare “soft” player names to see if they match.
-        3. Compare date fields if present and non-trivial.
-    """
-    # 1) If the length of plys is large, we treat them as duplicates if they share same end pos.
-    #    Actually they do share the same end pos if they're in game_hashes for the same position,
-    #    but let's confirm we do not have error categories or short games.
-    if plys_a != plys_b:
-      return False
-    if len(plys_a) >= hard_ply_threshold:
-      # no game can be considered not a duplicate past the hard_ply_threshold!
-      return True
-    if len(plys_a) >= soft_ply_threshold:
-      # soft compare player names, e.g. "John Doe" vs "Doe, John A"
-      w_a: str = self._NormalizePlayer(headers_a.get('white', ''))
-      w_b: str = self._NormalizePlayer(headers_b.get('white', ''))
-      if w_a != w_b:
-        return False
-      b_a: str = self._NormalizePlayer(headers_a.get('black', ''))
-      b_b: str = self._NormalizePlayer(headers_b.get('black', ''))
-      if b_a != b_b:
-        return False
-      # if we get here, we consider them duplicates
-      return True
-    # 2) If both games are short, we treat them as unique unless they have identical date + players
-    #    or other strong match. This is up to your preference.
-    date_a: str = headers_a.get('date', '')
-    date_b: str = headers_b.get('date', '')
-    if date_a and date_a == date_b:
-      # check players again, but be more strict or less strict
-      w_a = self._NormalizePlayer(headers_a.get('white', ''))
-      w_b = self._NormalizePlayer(headers_b.get('white', ''))
-      b_a = self._NormalizePlayer(headers_a.get('black', ''))
-      b_b = self._NormalizePlayer(headers_b.get('black', ''))
-      if w_a == w_b and b_a == b_b:
-        return True
-    # otherwise not duplicates
-    return False
-
-  def _NormalizePlayer(self, name: str) -> str:
-    """Soft compare approach for player name, ignoring punctuation and
-    reversing 'lastname, firstname' forms, etc."""
-    # all lowercase, remove commas & dots, trim multiple spaces
-    name = name.lower().replace('.', '').strip()
-    # for now just unify to a single spaced string; try to reorder if there's a comma
-    return ' '.join(name.split(', ')[::-1])
-
-  def _MergeGameHeaders(
-      self, headers_a: dict[str, str], headers_b: dict[str, str]) -> dict[str, str]:
-    """Unify (new object) 2 headers, adding if no conflict, else merge with '|' delimiter."""
-    merged: dict[str, str] = dict(headers_a)
-    for k, v in headers_b.items():
-      if not v or k == 'issues':
-        continue
-      if k not in merged:
-        merged[k] = v
-      else:
-        if (original := merged[k]).lower() != v.lower():
-          # if they differ, combine them with a pipe
-          if k == 'result':
-            # mark result as unknown?
-            merged['result'] = '*'
-          else:
-            merged[k] = f'{merged[k]} | {v}'
-          merged.setdefault('issues', set()).add(f'{k}: {original!r}/{v!r}')  # type: ignore
-    return merged
 
   def CachedLoadFromURL(self, url: str, cache: Optional[PGNCache]) -> Generator[
       tuple[int, str, int, str, chess.pgn.Game], None, None]:
