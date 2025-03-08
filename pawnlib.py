@@ -29,6 +29,7 @@ import chess.engine
 import chess.pgn
 import chess.polyglot
 import py7zr
+import tqdm
 
 from baselib import base
 from pawnalyze import pawnzobrist
@@ -62,7 +63,7 @@ ELO_CATEGORY_TO_PLY: dict[str, int] = {  # ply depth search for STOCKFISH VERSIO
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
 STANDARD_CHESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 STARTING_POSITION_HASH: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(chess.pgn.Game().board())
-_PRINT_EVERY_N = 1000
+_PRINT_EVERY_N = 10000
 _EMPTY_HEADER_VALUES: set[str] = {
     '?', '??', '???', '????',
     'x', 'xx', 'xxx', 'xxxx',
@@ -234,37 +235,54 @@ def DecodePly(ply: int) -> chess.Move:
   return chess.Move(from_square, ply, promotion=promotion)
 
 
-def _SplitLargePGN(file_path: str) -> Generator[list[str], None, None]:
+def CountFileLines(file_path: str) -> int:
+  """Reads a file just to count the lines. Only worth it if processing file is tough."""
+  with open(file_path, 'rt', encoding='utf-8', errors='ignore') as file_in:
+    count: int = 0
+    for count, _ in enumerate(file_in):
+      pass
+  return count
+
+
+def _SplitLargePGN(file_path: str) -> Generator[tuple[list[str], int], None, None]:
   """A very rough splitting of a huge PGN into individual games."""
   game_lines: list[str] = []
   saw_game: bool = False
+  # we open first to just count the lines
+  with base.Timer() as count_timer:
+    logging.info('Counting file lines...')
+    total_lines: int = CountFileLines(file_path)
+  logging.info(
+      'File with %s lines (read in %s)', base.HumanizedDecimal(total_lines), count_timer.readable)
+  # we open a second time to actually read
   with open(file_path, 'rt', encoding='utf-8', errors='replace') as file_in:
-    count = 0
-    for count, line in enumerate(file_in):
+    count: int = 0
+    line: str = ''
+    for count, line in tqdm.tqdm(enumerate(file_in), desc='Processing', total=total_lines):  # type: ignore
       # strip the line and skip if empty
-      pgn_line: str = line.strip()
+      pgn_line: str = line.strip()  # type: ignore
       if not pgn_line:
         continue
       # we have a content line
-      if pgn_line.startswith('['):
+      if pgn_line.startswith('['):  # type: ignore
         # we have a header line
         if game_lines and saw_game:
           # we have a header+game in the lines, so we output it and restart
-          yield game_lines
+          yield (game_lines, count)
           game_lines, saw_game = [], False
       else:
         saw_game = True
       # add this line to the buffer
-      game_lines.append(pgn_line)
+      game_lines.append(pgn_line)  # type: ignore
     # if file didn't end with an empty line, you may have a last game to process:
     if game_lines:
-      yield game_lines
-    logging.info('Finished parsing %d lines of PGN', count + 1)
+      yield (game_lines, count)
+    logging.info('Finished parsing %d lines of PGN', count + 1)  # type: ignore
 
 
-def _GamesFromLargePGN(file_path: str) -> Generator[tuple[str, chess.pgn.Game], None, None]:
+def _GamesFromLargePGN(file_path: str) -> Generator[tuple[str, chess.pgn.Game, int], None, None]:
   """Get individual PGN games and parse them."""
-  for game_lines in _SplitLargePGN(file_path):
+  for game_lines, n_line in _SplitLargePGN(file_path):
     pgn: str = '\n'.join(game_lines)
     pgn_io = io.StringIO(pgn)
     game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
@@ -273,7 +291,7 @@ def _GamesFromLargePGN(file_path: str) -> Generator[tuple[str, chess.pgn.Game], 
     other_game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
     if other_game:
       raise ValueError(f'Game lines have more than one game: {game_lines!r}')
-    yield (pgn, game)
+    yield (pgn, game, n_line)
 
 
 def IterateGame(game: chess.pgn.Game) -> Generator[
@@ -485,28 +503,35 @@ def _WorkerProcessEvalTask(
   p_eval: PositionEval
   db = PGNData()
   try:
-    # only once: open Stockfish/engine in UCI mode, also open a log file in _PGN_DATA_DIR
+    # only once: open Stockfish/engine in UCI mode, also append to a log file in _PGN_DATA_DIR
     with (chess.engine.SimpleEngine.popen_uci(engine_path) as engine,
           open(os.path.join(_PGN_DATA_DIR, f'worker-{worker_n}.logs'),
-               'wt+', encoding='utf-8') as file_obj):
+               'at', encoding='utf-8') as file_obj):
       # main loop: pick up a task and execute it
       file_obj.write(f'Starting worker thread #{worker_n}')
       while True:
         try:
           p_hash = tasks.get(timeout=timeout)  # type:ignore
+          if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
+            file_obj.write('Worker #{worker_n} received sentinel, exiting.')
+            break
+          # we have a task: evaluate and save
+          position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
+          with base.Timer() as fen_timer:
+            fen = db.PositionHashToFEN(position)[0]
+          with base.Timer() as engine_timer:
+            p_eval = FindBestMove(fen, depth, engine_obj=engine)[1]
+          db.UpdatePositionEvaluation(position, p_eval)
+          file_obj.write(
+              f'{p_hash} ({fen} @{fen_timer.readable}) => {p_eval!r} @{engine_timer.readable}\n')
         except queue.Empty:
           file_obj.write(f'Worker #{worker_n} timed out, no tasks available. Exiting.')
           break
-        if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
-          file_obj.write('Worker #{worker_n} received sentinel, exiting.')
-          break
-        # we have a task: evaluate and save
-        position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
-        fen = db.PositionHashToFEN(position)[0]
-        p_eval = FindBestMove(fen, depth, engine_obj=engine)[1]
-        db.UpdatePositionEvaluation(position, p_eval)
-        file_obj.write(f'{p_hash} ({fen}) => {p_eval!r}\n')
-        file_obj.flush()
+        except Exception as err:
+          file_obj.write(f'Worker #{worker_n} exception: {err}')
+          raise
+        finally:
+          file_obj.flush()
   finally:
     db.Close()
 
@@ -695,20 +720,31 @@ class PGNData:
 
   }
 
-  def __init__(self) -> None:
-    """Open or create the SQLite DB."""
+  def __init__(self, readonly: bool = False) -> None:
+    """Open or create the SQLite DB.
+
+    Args:
+      readonly: (default: False) if True DB will not save data
+    """
+    self._readonly: bool = bool(readonly)
     # check data directory is there
     if not os.path.exists(_PGN_DATA_DIR):
+      if self._readonly:
+        raise ValueError('No data path and READONLY do not mix')
       os.makedirs(_PGN_DATA_DIR)
       logging.info('Created empty data dir %r', _PGN_DATA_DIR)
     # open DB, create if empty
     exists_db: bool = os.path.exists(_PGN_SQL_FILE)
-    self._conn: sqlite3.Connection = sqlite3.connect(_PGN_SQL_FILE)
+    self._conn: sqlite3.Connection = sqlite3.connect(
+        f'file:{_PGN_SQL_FILE}{"?mode=ro" if self._readonly else ""}', uri=True)
     self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
     self._known_hashes: Optional[set[str]] = None    # lazy hashes cache
     if exists_db:
-      logging.info('Opening SQLite DB in %r', _PGN_SQL_FILE)
+      logging.info(
+          'Opening %sSQLite DB in %r', 'READONLY ' if self._readonly else '', _PGN_SQL_FILE)
     else:
+      if self._readonly:
+        raise ValueError('Empty database and READONLY do not mix')
       logging.info('Creating new SQLite DB in %r', _PGN_SQL_FILE)
       self._EnsureSchema()
       logging.info('Adding standard chess base position...')
@@ -723,6 +759,8 @@ class PGNData:
 
   def _EnsureSchema(self) -> None:
     """Create tables if they do not exist."""
+    if self._readonly:
+      return
     if (names := set(PGNData._TABLE_ORDER)) != (tables := set(PGNData._TABLES.keys())):
       raise ValueError(
           f'_TABLE_ORDER should be the same keys in _TABLES: {sorted(names)} versus {sorted(tables)}')
@@ -733,6 +771,8 @@ class PGNData:
 
   def DropAllTables(self) -> None:
     """Drop all tables from the database (destructive operation)."""
+    if self._readonly:
+      return
     with self._conn:
       for name in PGNData._TABLE_ORDER[::-1]:
         logging.info('Deleting table %r', name)
@@ -741,6 +781,8 @@ class PGNData:
 
   def DeleteDBFile(self) -> None:
     """Closes connection and deletes the entire DB file from disk."""
+    if self._readonly:
+      return
     self._conn.close()
     if os.path.exists(_PGN_SQL_FILE):
       os.remove(_PGN_SQL_FILE)
@@ -748,6 +790,8 @@ class PGNData:
 
   def WipeData(self) -> None:
     """Delete all data and data file."""
+    if self._readonly:
+      return
     self.DropAllTables()
     self.DeleteDBFile()
 
@@ -762,9 +806,10 @@ class PGNData:
     row: Optional[tuple[int, str, Optional[str]]] = cursor.fetchone()  # primary key == position_hash
     if not row:
       # brand new entry, guaranteed to have only one ExtraInsightPositionFlag & one hash
-      self._conn.execute(
-          'INSERT INTO positions (position_hash, flags, extras, game_hashes) VALUES (?, ?, ?, ?)',
-          (str(position_hash), flags.value, f'{extras.value:x}', game_hash if game_hash else None))
+      if not self._readonly:
+        self._conn.execute(
+            'INSERT INTO positions (position_hash, flags, extras, game_hashes) VALUES (?, ?, ?, ?)',
+            (str(position_hash), flags.value, f'{extras.value:x}', game_hash if game_hash else None))
       return True
     # we already have this position, so we check if flags are consistent and add headers, if any
     if row[0] != flags.value:
@@ -783,7 +828,7 @@ class PGNData:
         existing_hashes_set.add(game_hash)
         row_changed = True
     # save, if needed
-    if row_changed:
+    if row_changed and not self._readonly:
       self._conn.execute(
           'UPDATE positions SET extras = ?, game_hashes = ? WHERE position_hash = ?',
           (','.join(sorted(existing_extras_set)),
@@ -810,31 +855,34 @@ class PGNData:
   def UpdatePositionEvaluation(
       self, position_hash: pawnzobrist.Zobrist, evaluation: PositionEval) -> None:
     """Update a position setting its engine evaluation. Position must exist previously."""
-    with self._conn:
-      self._conn.execute(
-          'UPDATE positions SET engine = ? WHERE position_hash = ?',
-          (EncodeEval(evaluation), str(position_hash)))
+    if not self._readonly:
+      with self._conn:
+        self._conn.execute(
+            'UPDATE positions SET engine = ? WHERE position_hash = ?',
+            (EncodeEval(evaluation), str(position_hash)))
 
   def _InsertParsedGame(
       self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
       game_headers: dict[str, str]) -> None:
     """Insert a "successful" game in `game_hash` with `position_hash`, `game_plys`, and `game_headers`."""
-    self._conn.execute("""
-        INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
-        VALUES(?, ?, ?, ?, ?)
-    """, (game_hash, str(end_position_hash), ','.join(f'{p:x}' for p in game_plys),
-          json.dumps(game_headers), 0))
+    if not self._readonly:
+      self._conn.execute("""
+          INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers, error_category)
+          VALUES(?, ?, ?, ?, ?)
+      """, (game_hash, str(end_position_hash), ','.join(f'{p:x}' for p in game_plys),
+            json.dumps(game_headers), 0))
 
   def _InsertErrorGame(
       self, game_hash: str, game_headers: dict[str, str],
       error_category: ErrorGameCategory, error_pgn: str, error_message: str) -> None:
     """Insert an error game entry."""
-    self._conn.execute("""
-        INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers,
-                          error_category, error_pgn, error_message)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
-    """, (game_hash, str(STARTING_POSITION_HASH), '-', json.dumps(game_headers),
-          error_category.value, error_pgn, error_message))
+    if not self._readonly:
+      self._conn.execute("""
+          INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers,
+                            error_category, error_pgn, error_message)
+          VALUES(?, ?, ?, ?, ?, ?, ?)
+      """, (game_hash, str(STARTING_POSITION_HASH), '-', json.dumps(game_headers),
+            error_category.value, error_pgn, error_message))
 
   def _GetGame(self, game_hash: str) -> Optional[
       tuple[pawnzobrist.Zobrist, list[int], dict[str, str],
@@ -871,11 +919,19 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM games;')
     return {h[0] for h in cursor}  # stream into set
 
-  def _InsertDuplicateGame(self, game_hash: str, duplicate_of: str) -> None:
-    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash."""
-    self._conn.execute(
-        'INSERT OR IGNORE INTO duplicate_games(game_hash, duplicate_of) VALUES(?, ?)',
-        (game_hash, duplicate_of))
+  def _InsertDuplicateGame(
+      self, game_hash: str, duplicate_of: str, remove_from_games: bool = False) -> None:
+    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash.
+
+    Optionally remove from `games` table to save space.
+    """
+    if not self._readonly:
+      self._conn.execute(
+          'INSERT OR IGNORE INTO duplicate_games(game_hash, duplicate_of) VALUES(?, ?)',
+          (game_hash, duplicate_of))
+      # remove from games table, if requested
+      if remove_from_games:
+        self._conn.execute('DELETE FROM games WHERE game_hash = ?', (game_hash,))
 
   def _GetDuplicateGame(self, game_hash: str) -> Optional[str]:
     """Return duplicate for `game_hash` as hash into `games` table; None if not found."""
@@ -913,9 +969,10 @@ class PGNData:
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
     """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
-    self._conn.execute(
-        'INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash) VALUES(?, ?, ?)',
-        (str(from_hash), ply, str(to_hash)))
+    if not self._readonly:
+      self._conn.execute(
+          'INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash) VALUES(?, ?, ?)',
+          (str(from_hash), ply, str(to_hash)))
 
   def _GetMoves(
       self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, pawnzobrist.Zobrist]]:
@@ -1149,7 +1206,7 @@ class PGNData:
         primary_hash: str = temp_group.pop()
         with self._conn:
           for dgh in temp_group:
-            self._MarkGameAsDuplicate(dgh, primary_hash)
+            self._InsertDuplicateGame(dgh, primary_hash)  # should we set remove_from_games???????????????????
             known_duplicates.add(dgh)  # avoid re-processing
     # end
     return merges_done
@@ -1228,19 +1285,6 @@ class PGNData:
           merged.setdefault('issues', set()).add(f'{k}: {original!r}/{v!r}')  # type: ignore
     return merged
 
-  def _MarkGameAsDuplicate(self, duplicate_game_hash: str, primary_game_hash: str) -> None:
-    """Insert a 'duplicate_game' reference from `duplicate_game_hash` to `primary_game_hash`.
-
-    Optionally remove from 'games' table to save space.
-    """
-    # first make sure it is in the duplicates table
-    self._conn.execute(
-        'INSERT OR IGNORE INTO duplicate_games(game_hash, duplicate_of) VALUES(?, ?)',
-        (duplicate_game_hash, primary_game_hash))
-    # # remove from games table, if requested
-    # if remove_from_games:
-    #   self._conn.execute('DELETE FROM games WHERE game_hash = ?', (duplicate_game_hash,))
-
   def CachedLoadFromURL(self, url: str, cache: Optional[PGNCache]) -> Generator[
       tuple[int, str, int, str, chess.pgn.Game], None, None]:
     """Load a source from URL into DB, cached, yields (n, hash, plys, pgn, game)."""
@@ -1280,7 +1324,7 @@ class PGNData:
     processing_start: float = time.time()
     last_time: float = 0.0
     logging.info('Downloading local file %r', file_path)
-    for game_count, (pgn, game) in enumerate(_GamesFromLargePGN(file_path)):
+    for game_count, (pgn, game, n_line) in enumerate(_GamesFromLargePGN(file_path)):
       # we are building the DB
       game_hash: str
       plys: int
@@ -1295,12 +1339,11 @@ class PGNData:
         total_time: float = now - processing_start
         delta: float = now - last_time
         logging.info(
-            'Loaded %d games (%d plys, %d nodes, %0.1f%%) in %s '
-            '(%0.1f games/s %0.1f plys/s = %s per million games)',
-            game_count, ply_count, node_count,
+            'Loaded %d lines, %d games (%d plys, %d nodes, %0.1f%%) '
+            '%0.1f games/s %0.1f plys/s = %s per M-games',
+            n_line, game_count, ply_count, node_count,
             (100.0 * (actual_loaded_count - node_count) / actual_loaded_count) if actual_loaded_count else 0,
-            base.HumanizedSeconds(total_time), _PRINT_EVERY_N / delta,
-            (actual_loaded_count - last_ply) / delta,
+            _PRINT_EVERY_N / delta, (actual_loaded_count - last_ply) / delta,
             base.HumanizedSeconds(1000000.0 * total_time / actual_game_count) if actual_game_count else '?')
         last_time = now
         last_ply = actual_loaded_count
