@@ -13,6 +13,7 @@ import json
 import logging
 import multiprocessing
 import multiprocessing.queues
+import multiprocessing.managers
 import os
 import os.path
 # import pdb
@@ -47,6 +48,7 @@ _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
 _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 
 # tactical constants
+DEFAULT_ENGINE = 'stockfish'
 ELO_CATEGORY_TO_PLY: dict[str, int] = {  # ply depth search for STOCKFISH VERSION 17+
     'club': 4,    # club player
     'expert': 8,
@@ -256,7 +258,7 @@ def _SplitLargePGN(file_path: str) -> Generator[tuple[list[str], int], None, Non
     line: str = ''
     for count, line in tqdm.tqdm(  # type: ignore
         enumerate(file_in), total=total_lines,
-        mininterval=1.0, miniters=100, unit='ln', smoothing=0.8, colour='green'):
+        mininterval=1.0, miniters=100, unit='ln', smoothing=0.6, colour='green'):
       # strip the line and skip if empty
       pgn_line: str = line.strip()  # type: ignore
       if not pgn_line:
@@ -524,16 +526,16 @@ def _NormalizePlayer(name: str) -> str:
 
 
 def FindBestMove(
-    fen: str,
+    fen: str, /,
     depth: int = ELO_CATEGORY_TO_PLY['super'],
-    engine_path: str = 'stockfish',
+    engine_path: str = DEFAULT_ENGINE,
     engine_obj: Optional[chess.engine.SimpleEngine] = None) -> tuple[chess.Move, PositionEval]:
   """Finds the best move for a position (FEN) up to a depth.
 
   Args:
     fen: FEN string to use
     depth: (default 20 = ELO_CATEGORY_TO_PLY['super']) ply depth to search
-    engine_path: (default 'stockfish') the engine path to invoke
+    engine_path: (default DEFAULT_ENGINE) the engine path to invoke
     engine_obj: (default None) a open chess.engine.SimpleEngine; if given skips creation/engine_path
 
   Returns:
@@ -573,10 +575,11 @@ def FindBestMove(
 
 
 def _WorkerProcessEvalTask(
-    worker_n: int, tasks: multiprocessing.queues.Queue,  # type:ignore
-    depth: int, engine_path: str, timeout: float) -> None:
+    worker_n: int, db_readonly: bool, tasks: multiprocessing.queues.Queue,  # type:ignore
+    depth: int, engine_path: str, timeout: float,
+    tasks_done: multiprocessing.managers.DictProxy) -> None:  # type:ignore
   """Worker function that runs in a separate process or thread to evaluate chess positions."""
-  if not worker_n or not tasks or not engine_path:
+  if not tasks or not engine_path:
     raise ValueError('Empty parameters!')
   if depth < ELO_CATEGORY_TO_PLY['club']:
     raise ValueError(f'ply depth should be at least {ELO_CATEGORY_TO_PLY["club"]}')
@@ -584,36 +587,37 @@ def _WorkerProcessEvalTask(
   fen: str
   p_hash: str
   p_eval: PositionEval
-  db = PGNData()
+  db = PGNData(readonly=db_readonly)
   try:
     # only once: open Stockfish/engine in UCI mode, also append to a log file in _PGN_DATA_DIR
     with (chess.engine.SimpleEngine.popen_uci(engine_path) as engine,
           open(os.path.join(_PGN_DATA_DIR, f'worker-{worker_n}.logs'),
                'at', encoding='utf-8') as file_obj):
       # main loop: pick up a task and execute it
-      file_obj.write(f'Starting worker thread #{worker_n} @ {base.STR_TIME()}')
+      file_obj.write(f'\n\nStarting worker thread #{worker_n} @ {base.STR_TIME()}\n\n')
       file_obj.flush()
       while True:
         try:
           p_hash = tasks.get(timeout=timeout)  # type:ignore
           if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
-            file_obj.write('Worker #{worker_n} received sentinel, exiting.')
+            file_obj.write('Worker #{worker_n} received sentinel, exiting.\n\n')
             break
           # we have a task: evaluate and save
           position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
           with base.Timer() as fen_timer:
             fen = db.PositionHashToFEN(position)[0]
           with base.Timer() as engine_timer:
-            p_eval = FindBestMove(fen, depth, engine_obj=engine)[1]
+            p_eval = FindBestMove(fen, depth=depth, engine_obj=engine)[1]
           db.UpdatePositionEvaluation(position, p_eval)
           file_obj.write(
               f'{p_hash} ({fen} @{fen_timer.readable}) => {p_eval!r} @{engine_timer.readable}\n')
+          tasks_done[worker_n] = tasks_done[worker_n] + 1
         except queue.Empty:
           file_obj.write(
-              f'Worker #{worker_n} timed out, no tasks available. Exiting. @ {base.STR_TIME()}')
+              f'Worker #{worker_n} timed out, no tasks available. Exiting. @ {base.STR_TIME()}\n\n')
           break
         except Exception as err:
-          file_obj.write(f'Worker #{worker_n} exception @ {base.STR_TIME()}: {err}')
+          file_obj.write(f'Worker #{worker_n} exception @ {base.STR_TIME()}: {err}\n\n')
           raise
         finally:
           file_obj.flush()
@@ -622,17 +626,19 @@ def _WorkerProcessEvalTask(
 
 
 def RunEvalWorkers(
-    num_workers: int, tasks: list[str], timeout: float,
-    depth: int = ELO_CATEGORY_TO_PLY['super'], engine_path: str = 'stockfish') -> None:
+    num_workers: int, db_readonly: bool, tasks: list[str], timeout: float,
+    depth: int, engine_path: str) -> None:
   """Spawns multiple worker processes to process list of (fen_string, position_hash) tasks.
 
   Each worker calls WorkerProcessEvalTask(...) in a new process.
 
   Args:
     num_workers: number of worker threads
-    depth: (default 20 = ELO_CATEGORY_TO_PLY['super']) ply depth to search
-    engine_path: (default 'stockfish') the engine path to invoke
-    timeout: (default _WORKER_TIMEOUT_SECONDS) seconds until worker timeout
+    db_readonly: is the DB readonly?
+    tasks: list of position hashes to look at
+    timeout: seconds until worker timeout
+    depth: ply depth to search
+    engine_path: the engine path to invoke
   """
   eval_queue: multiprocessing.queues.Queue = multiprocessing.Queue()  # type:ignore
   for position in tasks:
@@ -640,23 +646,41 @@ def RunEvalWorkers(
   logging.info('Enqueued %d positions for engine evaluation', len(tasks))
   # create worker processes
   processes: list[multiprocessing.Process] = []
-  for i in range(num_workers):
-    worker_thread = multiprocessing.Process(
-        target=_WorkerProcessEvalTask,                          # type:ignore
-        args=(i + 1, eval_queue, depth, engine_path, timeout))  # type:ignore
-    worker_thread.start()
-    processes.append(worker_thread)
-  logging.info('Spawned %d engine eval workers with depth %d', num_workers, depth)
-  # wait for them to finish or do something else
-  for p in processes:  # TODO: change to progressbar based on qsize()
-    p.join(timeout)
-    if p.is_alive():
-      # force the sentinel so they can exit
-      eval_queue.put(_WORKER_SENTINEL_MESSAGE)  # type:ignore
-  # re-join them
-  for p in processes:
-    p.join(timeout)
-  logging.info('All engine eval workers done')
+  with multiprocessing.Manager() as manager:
+    tasks_done: multiprocessing.managers.DictProxy = manager.dict()  # {worker: count_done}  # type:ignore
+    for i in range(num_workers):
+      tasks_done[i] = 0
+      worker_thread = multiprocessing.Process(
+          target=_WorkerProcessEvalTask,                                               # type:ignore
+          args=(i, db_readonly, eval_queue, depth, engine_path, timeout, tasks_done))  # type:ignore
+      worker_thread.start()
+      processes.append(worker_thread)
+    logging.info('Spawned %d engine eval workers with depth %d', num_workers, depth)
+    time.sleep(1)
+    # monitor queue size
+    progress_bar: tqdm.tqdm = tqdm.tqdm(
+        total=len(tasks), mininterval=1.0, miniters=1, unit='ev', smoothing=0.4, colour='green')
+    last_done: int = 0
+    try:
+      while (len(tasks) - last_done) > num_workers:
+        queue_done: int = sum(tasks_done.values())  # type:ignore
+        delta: int = queue_done - last_done
+        if delta:
+          progress_bar.update(delta)
+        last_done = queue_done
+        time.sleep(1)
+    finally:
+      progress_bar.close()
+    # wait for them to finish or do something else
+    for p in processes:
+      p.join(timeout)
+      if p.is_alive():
+        # force the sentinel so they can exit
+        eval_queue.put(_WORKER_SENTINEL_MESSAGE)  # type:ignore
+    # re-join them
+    for p in processes:
+      p.join(timeout)
+    logging.info('All engine eval workers done')
 
 
 def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
@@ -818,6 +842,11 @@ class PGNData:
             STARTING_POSITION_HASH,
             PositionFlag(PositionFlag.WHITE_TO_MOVE), ExtraInsightPositionFlag(0))
 
+  @property
+  def is_readonly(self) -> bool:
+    """Is the DB readonly?"""
+    return self._readonly
+
   def Close(self) -> None:
     """Close the database connection."""
     self._conn.close()
@@ -916,6 +945,22 @@ class PGNData:
     return (flag, extras,
             None if row[2] is None else DecodeEval(row[2]),
             set() if row[3] is None else set(row[3].split(',')))
+
+  def GetPositions(
+      self, has_eval: bool, has_game: bool, limit: int = 0) -> Generator[
+          tuple[pawnzobrist.Zobrist, PositionFlag, set[ExtraInsightPositionFlag],
+                Optional[PositionEval], set[str]], None, None]:
+    """Yields `positions` that `has_eval` and `has_game` up to `limit`."""
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT position_hash, flags, extras, engine, game_hashes FROM positions WHERE '
+        f'engine IS {"NOT " if has_eval else ""}NULL and '
+        f'game_hashes IS {"NOT " if has_game else ""}NULL'
+        f'{f" LIMIT {limit}" if limit else ""};')
+    for p, f, e, s, h in cursor:  # stream results...
+      yield (pawnzobrist.ZobristFromHash(p), PositionFlag(f),
+             set(ExtraInsightPositionFlag(int(x, 16)) for x in e.split(',')),
+             None if s is None else DecodeEval(s),
+             set() if h is None else set(h.split(',')))
 
   def UpdatePositionEvaluation(
       self, position_hash: pawnzobrist.Zobrist, evaluation: PositionEval) -> None:
