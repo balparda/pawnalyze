@@ -1190,7 +1190,7 @@ class PGNData:
       return (game_hash, 0, 0)
 
   def DeduplicateGames(
-      self, soft_ply_threshold: int, hard_ply_threshold: int) -> list[dict[str, Any]]:
+      self, soft_ply_threshold: int, hard_ply_threshold: int) -> list[str]:
     """Deduplicate games.
 
     Finds positions in `positions` table that have multiple game_hashes and attempts
@@ -1221,7 +1221,7 @@ class PGNData:
     rows: list[tuple[str, str]] = cursor.fetchall()
     # we'll need to skip game_hashes already in duplicate_games:
     known_duplicates: set[str] = self.GetAllDuplicateHashes()
-    merges_done: list[dict[str, Any]] = []  # the return with info on merges we'll do
+    merges_done: list[str] = []  # the return with info on merges we'll do
     # go over the games that have ending positions with more than one hash
     for position_hash, g_hashes_str in rows:
       # parse game_hashes by comma
@@ -1260,14 +1260,12 @@ class PGNData:
           duplicates_found.append(group)
       # Step 3: for each group of duplicates found, record them
       for group in duplicates_found:
-        merges_done.append({
-            'position_hash': position_hash,
-            'duplicate_set': group,
-        })
+        merges_done.append(position_hash)
         # record duplicates in table 'duplicate_games' for all but the first
         # or whichever logic you want to keep as the “primary”
         temp_group: set[str] = set(group)
         primary_hash: str = temp_group.pop()
+        # TODO: we MUST make sure that primary_hash is always the same!
         with self._conn:
           for dgh in temp_group:
             d_game: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
