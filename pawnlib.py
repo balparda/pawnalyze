@@ -504,25 +504,24 @@ def _NormalizePlayer(name: str) -> str:
   return ' '.join(name.split(', ')[::-1])
 
 
-# TODO: rewrite to take all duplicates and on-the-fly have a merged dict
-# def _MergeGameHeaders(headers_a: dict[str, str], headers_b: dict[str, str]) -> dict[str, str]:
-#   """Unify (new object) 2 headers, adding if no conflict, else merge with '|' delimiter."""
-#   merged: dict[str, str] = dict(headers_a)
-#   for k, v in headers_b.items():
-#     if not v or k == 'issues':
-#       continue
-#     if k not in merged:
-#       merged[k] = v
-#     else:
-#       if (original := merged[k]).lower() != v.lower():
-#         # if they differ, combine them with a pipe
-#         if k == 'result':
-#           # mark result as unknown?
-#           merged['result'] = '*'
-#         else:
-#           merged[k] = f'{merged[k]} | {v}'
-#         merged.setdefault('issues', set()).add(f'{k}: {original!r}/{v!r}')  # type: ignore
-#   return merged
+def _MergeGameHeaders(headers_a: dict[str, str], headers_b: dict[str, str]) -> dict[str, str]:
+  """Unify (new object) 2 headers, adding if no conflict, else merge with '|' delimiter."""
+  merged: dict[str, str] = dict(headers_a)
+  for k, v in headers_b.items():
+    if not v or k == 'issues':
+      continue
+    if k not in merged:
+      merged[k] = v
+    else:
+      if (original := merged[k]).lower() != v.lower():
+        # if they differ, combine them with a pipe
+        if k == 'result':
+          # mark result as unknown?
+          merged['result'] = '*'
+        else:
+          merged[k] = f'{merged[k]} | {v}'
+        merged.setdefault('issues', set()).add(f'{k}: {original!r}/{v!r}')  # type: ignore
+  return merged
 
 
 def FindBestMove(
@@ -1034,6 +1033,15 @@ class PGNData:
             [] if row[1] == '-' else [int(p, 16) for p in row[1].split(',')],
             json.loads(row[2]), ErrorGameCategory(row[3]), row[4], row[5])
 
+  def SimpleGetHeader(self, game_hash: str) -> dict[str, str]:
+    """Get a single header for a single `game_hash`. Raises if not found."""
+    row: Optional[tuple[str]] = self._conn.execute(
+        'SELECT game_headers FROM games WHERE game_hash = ?', (game_hash,)).fetchone()
+    if not row:
+      raise ValueError(f'Game not found {game_hash}')
+    headers: dict[str, str] = json.loads(row[0])
+    return headers
+
   def _GetAllGames(self) -> Generator[
       tuple[str, pawnzobrist.Zobrist, list[int], dict[str, str],
             ErrorGameCategory, Optional[str], Optional[str]], None, None]:
@@ -1096,6 +1104,20 @@ class PGNData:
       logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
     # lookup
     return game_hash in self._known_hashes
+
+  def MergedHeaders(self, game_hash: str) -> dict[str, str]:
+    """Returns merged header for main games.game_hash plus all duplicates."""
+    # get headers for the main game
+    master_header: dict[str, str] = self.SimpleGetHeader(game_hash)
+    # find duplicates
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT game_headers FROM duplicate_games WHERE duplicate_of = ?', (game_hash,))
+    duplicates: list[tuple[str]] = cursor.fetchall()
+    # merge headers from each duplicate
+    for (dup_game_header,) in duplicates:
+      master_header = _MergeGameHeaders(master_header, json.loads(dup_game_header))
+    # all merged
+    return master_header
 
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
