@@ -34,7 +34,7 @@ __author__ = 'balparda@gmail.com (Daniel Balparda)'
 __version__ = (1, 0)
 
 
-_WORKER_THREADS_DEFAULT: int = 8       # number of worker threads to spawn
+_WORKER_THREADS_DEFAULT: int = 12      # number of worker threads to spawn
 _WORKER_TIMEOUT_SECONDS: float = 10.0  # seconds until a worker is considered timed-out
 _MIN_DEPTH: int = 3
 _DEFAULT_DEPTH: int = pawnlib.ELO_CATEGORY_TO_PLY['super']

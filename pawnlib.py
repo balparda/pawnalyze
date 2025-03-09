@@ -529,7 +529,8 @@ def FindBestMove(
     fen: str, /,
     depth: int = ELO_CATEGORY_TO_PLY['super'],
     engine_path: str = DEFAULT_ENGINE,
-    engine_obj: Optional[chess.engine.SimpleEngine] = None) -> tuple[chess.Move, PositionEval]:
+    engine_obj: Optional[chess.engine.SimpleEngine] = None) -> Optional[
+        tuple[chess.Move, PositionEval]]:
   """Finds the best move for a position (FEN) up to a depth.
 
   Args:
@@ -543,19 +544,21 @@ def FindBestMove(
   """
   if depth < 5:
     raise ValueError('Chess engine depth must be 5 or larger')
+  # take care of checkmate case
+  board = chess.Board(fen)
+  if board.is_checkmate() or board.is_stalemate():
+    return None
   # ask for an analysis from engine
   engine_info: chess.List[chess.engine.InfoDict]
   if engine_obj:
     # call engine: INFO_ALL is to get full data; multipv=1 means only the single best line
     engine_info = engine_obj.analyse(
-        chess.Board(fen), limit=chess.engine.Limit(depth=depth),
-        info=chess.engine.INFO_ALL, multipv=1)
+        board, limit=chess.engine.Limit(depth=depth), info=chess.engine.INFO_ALL, multipv=1)
   else:
     # open Stockfish/engine in UCI mode
     with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
       engine_info = engine.analyse(
-          chess.Board(fen), limit=chess.engine.Limit(depth=depth),
-          info=chess.engine.INFO_ALL, multipv=1)
+          board, limit=chess.engine.Limit(depth=depth), info=chess.engine.INFO_ALL, multipv=1)
   # check the result is as expected; best move is first move of best line
   if (len(engine_info) != 1 or
       not engine_info[0].get('pv', None) or
@@ -585,8 +588,9 @@ def _WorkerProcessEvalTask(
     raise ValueError(f'ply depth should be at least {ELO_CATEGORY_TO_PLY["club"]}')
   # local connection: each thread must have it own
   fen: str
-  p_hash: str
-  p_eval: PositionEval
+  task: set[str]
+  p_hash: str = ''
+  p_eval: Optional[tuple[chess.Move, PositionEval]]
   db = PGNData(readonly=db_readonly)
   try:
     # only once: open Stockfish/engine in UCI mode, also append to a log file in _PGN_DATA_DIR
@@ -598,20 +602,26 @@ def _WorkerProcessEvalTask(
       file_obj.flush()
       while True:
         try:
-          p_hash = tasks.get(timeout=timeout)  # type:ignore
-          if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
-            file_obj.write('Worker #{worker_n} received sentinel, exiting.\n\n')
-            break
-          # we have a task: evaluate and save
-          position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
-          with base.Timer() as fen_timer:
-            fen = db.PositionHashToFEN(position)[0]
-          with base.Timer() as engine_timer:
-            p_eval = FindBestMove(fen, depth=depth, engine_obj=engine)[1]
-          db.UpdatePositionEvaluation(position, p_eval)
-          file_obj.write(
-              f'{p_hash} ({fen} @{fen_timer.readable}) => {p_eval!r} @{engine_timer.readable}\n')
-          tasks_done[worker_n] = tasks_done[worker_n] + 1
+          task = tasks.get(timeout=timeout)  # type:ignore
+          for p_hash in task:                # type:ignore
+            if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
+              file_obj.write('Worker #{worker_n} received sentinel, exiting.\n\n')
+              break
+            # we have a task: evaluate and save
+            position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
+            with base.Timer() as fen_timer:
+              fen = db.PositionHashToFEN(position)[0]
+            with base.Timer() as engine_timer:
+              p_eval = FindBestMove(fen, depth=depth, engine_obj=engine)
+            if p_eval:
+              db.UpdatePositionEvaluation(position, p_eval[1])
+              file_obj.write(
+                  f'{p_hash} ({fen} @{fen_timer.readable}) => '
+                  f'{p_eval[1]!r} @{engine_timer.readable}\n')
+            else:
+              file_obj.write(
+                  f'{p_hash} ({fen} @{fen_timer.readable}) => None\n')
+            tasks_done[worker_n] = tasks_done[worker_n] + 1  # this is only OK because each thread has its own
         except queue.Empty:
           file_obj.write(
               f'Worker #{worker_n} timed out, no tasks available. Exiting. @ {base.STR_TIME()}\n\n')
@@ -621,6 +631,9 @@ def _WorkerProcessEvalTask(
           raise
         finally:
           file_obj.flush()
+        # check for sentinel
+        if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
+          break
   finally:
     db.Close()
 
@@ -640,10 +653,20 @@ def RunEvalWorkers(
     depth: ply depth to search
     engine_path: the engine path to invoke
   """
+  # get number of tasks: unfortunately Queue() can't handle more than ~10000 items
+  # so we have to feed them to the queue either individually or in groups
+  n_tasks: int = len(tasks)
+  set_tasks: list[set[str]] = []
+  tasks_per_queue_item: int = (n_tasks // 10000) + 1
   eval_queue: multiprocessing.queues.Queue = multiprocessing.Queue()  # type:ignore
-  for position in tasks:
-    eval_queue.put(position)  # type:ignore
-  logging.info('Enqueued %d positions for engine evaluation', len(tasks))
+  for i in range(0, n_tasks, tasks_per_queue_item):
+    new_task: set[str] = set()
+    for j in range(tasks_per_queue_item):
+      if i + j < n_tasks:
+        new_task.add(tasks[i + j])
+    eval_queue.put(new_task)  # type:ignore
+    set_tasks.append(new_task)
+  logging.info('Enqueued %d positions (%d tasks) for engine evaluation', n_tasks, len(set_tasks))
   # create worker processes
   processes: list[multiprocessing.Process] = []
   with multiprocessing.Manager() as manager:
@@ -662,7 +685,7 @@ def RunEvalWorkers(
         total=len(tasks), mininterval=1.0, miniters=1, unit='ev', smoothing=0.4, colour='green')
     last_done: int = 0
     try:
-      while (len(tasks) - last_done) > num_workers:
+      while (n_tasks - last_done) > num_workers:
         queue_done: int = sum(tasks_done.values())  # type:ignore
         delta: int = queue_done - last_done
         if delta:
@@ -676,7 +699,7 @@ def RunEvalWorkers(
       p.join(timeout)
       if p.is_alive():
         # force the sentinel so they can exit
-        eval_queue.put(_WORKER_SENTINEL_MESSAGE)  # type:ignore
+        eval_queue.put({_WORKER_SENTINEL_MESSAGE})  # type:ignore
     # re-join them
     for p in processes:
       p.join(timeout)
