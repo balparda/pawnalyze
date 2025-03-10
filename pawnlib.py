@@ -288,6 +288,7 @@ def _GamesFromLargePGN(file_path: str) -> Generator[tuple[str, chess.pgn.Game, i
     game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
     if not game:
       raise ValueError(f'No game found in game lines: {game_lines!r}')
+    # we are strict on purpose: we don't want any PGN with more than one game in it
     other_game: chess.pgn.Game = chess.pgn.read_game(pgn_io)  # type:ignore
     if other_game:
       raise ValueError(f'Game lines have more than one game: {game_lines!r}')
@@ -446,11 +447,6 @@ def _IsDuplicateGame(
     soft_ply_threshold: int, hard_ply_threshold: int) -> bool:
   """Decide if game A and game B are duplicates. Returns True if we consider them duplicates.
 
-      1. If both have ply counts >= ply_threshold and share the same ending position, we strongly
-        suspect duplication.
-      2. Compare “soft” player names to see if they match.
-      3. Compare date fields if present and non-trivial.
-
   Args:
     plys_a: plys for first game
     headers_a: headers for first game
@@ -458,15 +454,19 @@ def _IsDuplicateGame(
     headers_b: headers for second game
     soft_ply_threshold: games with >= ply depth than this are easier to declare duplicates
     hard_ply_threshold: games with >= ply depth than this are always considered duplicates
+
+  Returns:
+    True if duplicates, False otherwise
   """
-  # 1) If the length of plys is large, we treat them as duplicates if they share same end pos.
+  # 1. Duplicates are not just per position: the whole game has to be identical
+  if plys_a != plys_b:
+    return False  # we are strict: no difference in plies allowed
+  # 2. Apply the "hard" threshold: above this number of plies, the games have to be the same
+  if len(plys_a) >= hard_ply_threshold:
+    return True  # no game can be considered not a duplicate past the hard_ply_threshold!
+  # 3. If the length of plys is large, we treat them as duplicates if they share same end pos.
   #    Actually they do share the same end pos if they're in game_hashes for the same position,
   #    but let's confirm we do not have error categories or short games.
-  if plys_a != plys_b:
-    return False
-  if len(plys_a) >= hard_ply_threshold:
-    # no game can be considered not a duplicate past the hard_ply_threshold!
-    return True
   if len(plys_a) >= soft_ply_threshold:
     # soft compare player names, e.g. "John Doe" vs "Doe, John A"
     w_a: str = _NormalizePlayer(headers_a.get('white', ''))
@@ -479,7 +479,7 @@ def _IsDuplicateGame(
       return False
     # if we get here, we consider them duplicates
     return True
-  # 2) If both games are short, we treat them as unique unless they have identical date + players
+  # 4. If both games are short, we treat them as unique unless they have identical date + players
   #    or other strong match. This is up to your preference.
   date_a: str = headers_a.get('date', '')
   date_b: str = headers_b.get('date', '')
@@ -627,7 +627,7 @@ def _WorkerProcessEvalTask(
           break
         except Exception as err:
           file_obj.write(f'Worker #{worker_n} exception @ {base.STR_TIME()}: {err}\n\n')
-          raise
+          raise  # we really don't want to eat this exception up, so we allow the thread to crash
         finally:
           file_obj.flush()
         # check for sentinel
@@ -911,6 +911,17 @@ class PGNData:
     self.DropAllTables()
     self.DeleteDBFile()
 
+  def IsHashInDB(self, game_hash: str) -> bool:
+    """Checks if a `game_hash` was in the DB at the beginning of a run."""
+    # lazy load of cache
+    if self._known_hashes is None:
+      self._known_hashes = self.GetAllKnownHashes()
+      logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
+    # lookup
+    return game_hash in self._known_hashes
+
+  # POSITIONS TABLE ################################################################################
+
   def _InsertPosition(
       self, position_hash: pawnzobrist.Zobrist, flags: PositionFlag,
       extras: ExtraInsightPositionFlag, game_hash: Optional[str] = None) -> bool:
@@ -984,6 +995,18 @@ class PGNData:
              None if s is None else DecodeEval(s),
              set() if h is None else set(h.split(',')))
 
+  def _GetPositionsWithGamesOrNot(self) -> tuple[set[str], set[str]]:
+    """Return a set{position_hash} for positions with games and set{position_hash} without games."""
+    positions_with_games: set[str] = set()
+    positions_without_games: set[str] = set()
+    cursor: sqlite3.Cursor = self._conn.execute('SELECT position_hash, game_hashes FROM positions')
+    for position_hash, game_hashes in cursor:  # stream cursor
+      if game_hashes:
+        positions_with_games.add(position_hash)
+      else:
+        positions_without_games.add(position_hash)
+    return (positions_with_games, positions_without_games)
+
   def UpdatePositionEvaluation(
       self, position_hash: pawnzobrist.Zobrist, evaluation: PositionEval) -> None:
     """Update a position setting its engine evaluation. Position must exist previously."""
@@ -992,6 +1015,8 @@ class PGNData:
         self._conn.execute(
             'UPDATE positions SET engine = ? WHERE position_hash = ?',
             (EncodeEval(evaluation), str(position_hash)))
+
+  # GAMES TABLE ####################################################################################
 
   def _InsertParsedGame(
       self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
@@ -1060,9 +1085,31 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM games;')
     return {h[0] for h in cursor}  # stream into set
 
+  def _GetAllOKAndErrorGames(self) -> tuple[dict[str, str], set[str]]:
+    """"Gets all OK games as a dict {game_hash: end_position} and all error as set {game_hash}."""
+    ok_games: dict[str, str] = {}  # {game_hash: end_position}
+    error_games: set[str] = set()  # {game_hash}
+    cursor: sqlite3.Cursor = self._conn.execute(
+        'SELECT game_hash, end_position_hash, error_category FROM games')
+    for game_hash, end_position_hash, error_category in cursor:  # stream cursor
+      if error_category:
+        error_games.add(game_hash)
+      else:
+        ok_games[game_hash] = end_position_hash
+    return (ok_games, error_games)
+
+  # DUPLICATE_GAMES TABLE ##########################################################################
+
   def _InsertDuplicateGame(
       self, game_hash: str, duplicate_of: str, game_headers: dict[str, str]) -> None:
-    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash."""
+    """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash. Removes original.
+
+    We remove the row from the original table because:
+      1. we know the game has the exact same plies, so the end_position is also the same
+      2. we do not duplicate error games, so none of the error fields are needed
+      3. because of the above only the hash and header will have the meaningful differences,
+         and we copy the headers here first
+    """
     if self._readonly:
       logging.info('new duplicate_games(%s, %s, %r)', game_hash, duplicate_of, game_headers)
       logging.info('delete games(%s)', game_hash)
@@ -1100,20 +1147,15 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM duplicate_games;')
     return {h[0] for h in cursor}  # stream into set
 
+  def _GetDuplicatesDict(self) -> dict[str, str]:
+    """Return all duplicates as a dict {game_hash: duplicate_of}."""
+    return dict(self._conn.execute('SELECT game_hash, duplicate_of FROM duplicate_games'))  # stream cursor
+
   def GetAllKnownHashes(self) -> set[str]:
     """Gets all game hashes in DB, all from table `games` and all from `duplicate_games`."""
     all_hashes: set[str] = self.GetAllGameHashes()
     all_hashes.update(self.GetAllDuplicateHashes())
     return all_hashes
-
-  def IsHashInDB(self, game_hash: str) -> bool:
-    """Checks if a `game_hash` was in the DB at the beginning of a run."""
-    # lazy load of cache
-    if self._known_hashes is None:
-      self._known_hashes = self.GetAllKnownHashes()
-      logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
-    # lookup
-    return game_hash in self._known_hashes
 
   def MergedHeaders(self, game_hash: str) -> dict[str, str]:
     """Returns merged header for main games.game_hash plus all duplicates."""
@@ -1128,6 +1170,8 @@ class PGNData:
       master_header = _MergeGameHeaders(master_header, json.loads(dup_game_header))
     # all merged
     return master_header
+
+  # MOVES TABLE ####################################################################################
 
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
@@ -1146,6 +1190,8 @@ class PGNData:
         WHERE from_position_hash = ?;
     """, (str(position_hash),))
     return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
+
+  ##################################################################################################
 
   def GetPositionsWithMultipleBranches(
       self, filter_engine_done: bool = False) -> dict[int, dict[str, dict[int, str]]]:
@@ -1310,38 +1356,43 @@ class PGNData:
         WHERE game_hashes IS NOT NULL
           AND game_hashes LIKE '%,%'
     """)
+    starting_position: str = str(STARTING_POSITION_HASH)
     rows: list[tuple[str, str]] = cursor.fetchall()
     # we'll need to skip game_hashes already in duplicate_games:
     known_duplicates: set[str] = self.GetAllDuplicateHashes()
     merges_done: list[str] = []  # the return with info on merges we'll do
     # go over the games that have ending positions with more than one hash
     for position_hash, g_hashes_str in rows:
+      if position_hash == starting_position:
+        continue  # skip root position
       # parse game_hashes by comma
       all_gs: list[str] = [h for h in g_hashes_str.split(',') if h not in known_duplicates]
       if len(all_gs) < 2:
         continue  # after skipping known duplicates, might not have actual multiples
       # Step 2: fetch `games` for each and compare them to find which are duplicates among them
       # we'll store groups of duplicates and produce a unified header for each group
-      potential_games: list[tuple[str, list[int], dict[str, str], ErrorGameCategory]] = []
+      potential_games: list[tuple[str, list[int], dict[str, str]]] = []
       for gh in all_gs:
         g_info: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
                                Optional[str], Optional[str]]] = self._GetGame(gh)
         if not g_info:
           raise ValueError(f'Game {gh!r} not found!')
         _, plys_list, game_headers, err_cat, _, _ = g_info
-        potential_games.append((gh, plys_list, game_headers, err_cat))
+        if err_cat.value:
+          continue  # error games do not come into consideration
+        potential_games.append((gh, plys_list, game_headers))
       # Step 2b: form groups of duplicates
       visited: set[str] = set()
       duplicates_found: list[set[str]] = []  # [(set_of_hashes, merged_header)]
       for i in range(len(potential_games)):  # pylint: disable=consider-using-enumerate
-        gh_a, plys_a, head_a, _ = potential_games[i]
+        gh_a, plys_a, head_a = potential_games[i]
         if gh_a in visited:
           continue
         visited.add(gh_a)
         # We'll keep "duplicates" for gh_a in one group
         group: set[str] = {gh_a}
         for j in range(i + 1, len(potential_games)):
-          gh_b, plys_b, head_b, _ = potential_games[j]
+          gh_b, plys_b, head_b = potential_games[j]
           if gh_b in visited:
             continue
           # Step 2b: decide if these two are duplicates
@@ -1424,7 +1475,8 @@ class PGNData:
       ply_count += plys
       actual_loaded_count += plys if nodes else 0  # assume 0 nodes means we already have that block
       node_count += nodes
-      if not game_count % _PRINT_EVERY_N and game_count:
+      if not game_count % _PRINT_EVERY_N and game_count:  # by games loaded
+        # here we log by game count (not line), sporadically, to complement the line info
         now: float = time.time()
         total_time: float = now - processing_start
         delta: float = now - last_time
@@ -1438,3 +1490,78 @@ class PGNData:
         last_time = now
         last_ply = actual_loaded_count
       yield (game_count, game_hash, plys, pgn, game)
+
+  def PrintDatabaseCheck(self) -> None:
+    """
+    Does a complete check of the database, prints stats and any errors.
+
+    Steps:
+      (1) read all games, sorting them into ok_games vs error_games
+      (2) get all duplicate games
+      (3) gather positions that do/don't have games
+      (4) traverse the moves tree from the root to find unreachable or invalid leaf positions
+    """
+    # (1) read all games from `games`
+    print('Reading all games...')
+    ok_games, error_games = self._GetAllOKAndErrorGames()
+    print(f'{len(ok_games)} ok games and {len(error_games)} error games in database')
+    print()
+    # (2) get all duplicates from `duplicate_games`, do some basic checks
+    print('Reading all duplicate games...')
+    dup_map: dict[str, str] = self._GetDuplicatesDict()
+    dup_keys: set[str] = set(dup_map.keys())
+    dup_ok_repeats: set[str] = dup_keys.intersection(ok_games.keys())
+    dup_err_repeats: set[str] = dup_keys.intersection(error_games)
+    print(f'{len(dup_map)} duplicate games')
+    if dup_ok_repeats:
+      print(f'==> Found {len(dup_ok_repeats)} keys both in OK `games` and `duplicate_games`: '
+            f'{dup_ok_repeats!r}')
+    if dup_err_repeats:
+      print(f'==> Found {len(dup_err_repeats)} keys both in error `games` and `duplicate_games`: '
+            f'{dup_err_repeats!r}')
+    print()
+    # (3) gather positions that do/don't have games
+    print('Reading all positions games...')
+    positions_with_games, positions_without_games = self._GetPositionsWithGamesOrNot()
+    n_all_positions: int = len(positions_with_games) + len(positions_without_games)
+    print(f'{n_all_positions} total positions, '
+          f'{len(positions_with_games)} with game endings, '
+          f'{len(positions_without_games)} en-passant (no game ended here)')
+    print()
+    # (4) BFS/DFS from STARTING_POSITION_HASH to find reachable positions
+    # we'll consider the move graph from positions -> moves -> positions
+    print('Visiting all positions...')
+    visited_positions: set[str] = set()
+    to_visit: set[str] = {str(STARTING_POSITION_HASH)}
+    leaf_with_no_games: set[str] = set()
+    progress_bar: tqdm.tqdm = tqdm.tqdm(
+        total=n_all_positions, mininterval=1.0, miniters=100,
+        unit='pos', smoothing=0.4, colour='green')
+    while to_visit:
+      current: str = to_visit.pop()
+      if current in visited_positions:
+        continue
+      visited_positions.add(current)
+      # get next moves
+      rows: list[tuple[int, str]] = self._conn.execute(
+          'SELECT ply, to_position_hash FROM moves WHERE from_position_hash = ?',
+          (current,)).fetchall()
+      progress_bar.update(1)
+      for _, to_hash in rows:
+        if to_hash not in visited_positions:
+          to_visit.add(to_hash)
+      if not rows:
+        # this is a (end-)leaf node, so it should have a game...
+        if current not in positions_with_games:
+          leaf_with_no_games.add(current)
+    progress_bar.close()
+    # now we know which positions are reachable from the standard start
+    unreachable_positions: set[str] = (
+        positions_with_games.union(positions_without_games) - visited_positions)
+    if unreachable_positions:
+      print(f'==> Found {len(unreachable_positions)} unreachable positions: '
+            f'{unreachable_positions!r}')
+    if leaf_with_no_games:
+      print(f'==> Found {len(leaf_with_no_games)} leaf positions with no games: '
+            f'{leaf_with_no_games!r}')
+    print()

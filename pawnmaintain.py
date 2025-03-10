@@ -68,9 +68,13 @@ def Main() -> None:
       # execute the source reads
       print()
       with base.Timer() as op_timer:
-        print(f'Starting game DEDUPLICATION {soft_limit=} / {hard_limit=}')
+        print(f'Starting game DEDUPLICATION {soft_limit=} / {hard_limit=}...')
         changed_data: int = len(database.DeduplicateGames(soft_limit, hard_limit))
         print(f'{changed_data} games deduplicated')
+        print()
+        print('Starting DB check')
+        database.PrintDatabaseCheck()
+        print('DB check ended')
       print()
       print(f'Executed in {base.TERM_GREEN}{op_timer.readable}{base.TERM_END}')
       print()
