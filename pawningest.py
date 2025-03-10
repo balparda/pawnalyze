@@ -164,28 +164,6 @@ def Main() -> None:
 
 # sources we can handle should be "registered" here!
 _SOURCES: dict[str, tuple[str, str, list[str]]] = {  # name: (domain, human_url, list[download_url])
-    # 'lumbrasgigabase': (
-    #     'lumbrasgigabase.com',
-    #     'https://lumbrasgigabase.com/',
-    #     [
-    #         'blob:https://mega.nz/834c3f58-1bf8-4e5c-8bac-2e59c30b5ca7',
-
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2023-2/?wpdmdl=8752&amp;refresh=67bf14f94fce91740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2023/?wpdmdl=8068&amp;refresh=67bf14f950eac1740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2022/?wpdmdl=8069&amp;refresh=67bf14f951d761740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2021/?wpdmdl=8070&amp;refresh=67bf14f9529681740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2020/?wpdmdl=8071&amp;refresh=67bf14f95351b1740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2015-to-2019/?wpdmdl=8072&amp;refresh=67bf14f9540b71740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2005-to-2009/?wpdmdl=8074&amp;refresh=67bf14f954bf31740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2000-to-2004/?wpdmdl=8075&amp;refresh=67bf14f9557e91740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1990-to-1999/?wpdmdl=8076&amp;refresh=67bf14f9565111740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-2010-to-2014/?wpdmdl=8073&amp;refresh=67bf14f9570a41740575993',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1970-to-1989/?wpdmdl=8077&amp;refresh=67bf160c614521740576268',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1950-to-1969/?wpdmdl=8078&amp;refresh=67bf160c62c4e1740576268',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-1900-to-1949/?wpdmdl=8081&amp;refresh=67bf160c63fe71740576268',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-until-1899/?wpdmdl=8079&amp;refresh=67bf160c653251740576268',
-    #         'https://lumbrasgigabase.com/download/lumbras-giga-base-pgn-with-no-date/?wpdmdl=8080&amp;refresh=67bf160c666221740576268',
-    #     ]),
     'figshare': (
         'figshare.com',
         'https://figshare.com/articles/dataset/Chess_Database/4276523',
@@ -193,6 +171,10 @@ _SOURCES: dict[str, tuple[str, str, list[str]]] = {  # name: (domain, human_url,
             'https://ndownloader.figstatic.com/files/6971717',
         ]
     ),
+    #
+    # the other source that we look towards is "lumbrasgigabase" at https://lumbrasgigabase.com/
+    # but their PGNs have to be individually downloaded into a directory and parsed from there
+    #
 }
 _VALID_SOURCES: str = ','.join(str(i) for i in _SOURCES)
 

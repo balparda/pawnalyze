@@ -43,7 +43,8 @@ _MAX_NUMBER_TASKS: int = 1000000
 
 
 def AddEvaluationsOfRepeatPositionsToDB(
-    database: pawnlib.PGNData, num_threads: int, depth: int, engine_command: str) -> None:
+    database: pawnlib.PGNData, num_threads: int, depth: int,
+    num_tasks: int, engine_command: str) -> None:
   """Adds engine evaluations of repeat positions to chess DB. Multithreaded and efficient."""
   # get and display the numbers we will be sending to the engine
   result: dict[int, dict[str, dict[int, str]]] = database.GetPositionsWithMultipleBranches(
@@ -56,19 +57,21 @@ def AddEvaluationsOfRepeatPositionsToDB(
     n_per_count: int = len(result[n])
     print(f'  Branching into {n} moves: {n_per_count} positions')
     all_jobs.extend(sorted(result[n].keys()))
+    if len(all_jobs) > num_tasks:
+      break
   print()
-  print(f'Total: {len(all_jobs)} positions; STARTING threads to evaluate them')
+  print(f'Total: {len(all_jobs)} positions to evaluate; STARTING threads to evaluate them')
   print()
   pawnlib.RunEvalWorkers(
       num_threads, database.is_readonly, all_jobs, _WORKER_TIMEOUT_SECONDS, depth, engine_command)
 
 
-def AddEvaluationsOfFinalPositionsToDB(
+def AddEvaluationsOfPositionsToDB(
     database: pawnlib.PGNData, num_threads: int, depth: int,
-    num_tasks: int, engine_command: str) -> None:
+    num_tasks: int, engine_command: str, final_node: bool) -> None:
   """Adds engine evaluations of final positions to chess DB. Multithreaded and efficient."""
   all_jobs: list[str] = [str(r[0]) for r in database.GetPositions(
-      has_eval=False, has_game=True, limit=num_tasks)]
+      has_eval=False, has_game=final_node, limit=num_tasks)]
   print(f'Total: {len(all_jobs)} positions; STARTING threads to evaluate them')
   pawnlib.RunEvalWorkers(
       num_threads, database.is_readonly, all_jobs, _WORKER_TIMEOUT_SECONDS, depth, engine_command)
@@ -117,13 +120,20 @@ def Main() -> None:
     # creates objects
     database: pawnlib.PGNData = pawnlib.PGNData(readonly=db_readonly)
     try:
-      # execute the source reads
+      # execute the evaluations
       print()
       with base.Timer() as op_timer:
-        logging.info('Starting evaluation engine')
-        # AddEvaluationsOfRepeatPositionsToDB(database, num_threads, ply_depth, engine_command)
-        AddEvaluationsOfFinalPositionsToDB(
+        print('Adding evaluations of final positions to DB')
+        AddEvaluationsOfPositionsToDB(
+            database, num_threads, ply_depth, num_tasks, engine_command, True)
+        print()
+        print('Adding evaluations of repeat positions to DB')
+        AddEvaluationsOfRepeatPositionsToDB(
             database, num_threads, ply_depth, num_tasks, engine_command)
+        print()
+        print('Adding evaluations of positions that are missing to DB')
+        AddEvaluationsOfPositionsToDB(
+            database, num_threads, ply_depth, num_tasks, engine_command, False)
       print()
       print(f'Executed in {base.TERM_GREEN}{op_timer.readable}{base.TERM_END}')
       print()

@@ -65,7 +65,7 @@ def Main() -> None:
     # creates objects
     database: pawnlib.PGNData = pawnlib.PGNData(readonly=db_readonly)
     try:
-      # execute the source reads
+      # execute the DB checks
       print()
       with base.Timer() as op_timer:
         print(f'Starting game DEDUPLICATION {soft_limit=} / {hard_limit=}...')
