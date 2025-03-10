@@ -1085,6 +1085,16 @@ class PGNData:
         'SELECT game_hash FROM duplicate_games WHERE duplicate_of = ?;', (duplicate_of,))
     return {g[0] for g in cursor.fetchall()}  # non-stream
 
+  def _FindTopPrimary(self, game_hash: str) -> str:
+    """Follow 'duplicate_of' references to find top-most `game_hash`. If none, return game_hash."""
+    while True:
+      row: Optional[tuple[str]] = self._conn.execute(
+          'SELECT duplicate_of FROM duplicate_games WHERE game_hash = ?', (game_hash,)).fetchone()
+      if not row:
+        return game_hash  # no further chain, return previous result (or original game_hash)
+      # move to next link in the chain
+      game_hash = row[0]
+
   def GetAllDuplicateHashes(self) -> set[str]:
     """Gets all duplicate game hashes."""
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM duplicate_games;')
@@ -1284,22 +1294,14 @@ class PGNData:
     """Deduplicate games.
 
     Finds positions in `positions` table that have multiple game_hashes and attempts
-    to identify duplicates among those games. Duplicates are recorded in `duplicate_games`
-    (and optionally removed from `games` if not in dry_run mode).
+    to identify duplicates among those games. Duplicates are recorded in `duplicate_games`.
 
     Args:
       soft_ply_threshold: games with >= ply depth than this are easier to declare duplicates
       hard_ply_threshold: games with >= ply depth than this are always considered duplicates
 
     Returns:
-      A list of “unified header info” records produced by merging duplicates. Each
-      record is a dict with:
-      {
-          'position_hash': <str>,
-          'duplicate_set': [<list of game_hashes that were duplicates>],
-          'merged_header': <dict of merged header fields>,
-      }
-      All merges that happened are reported here for your reference.
+      A list of position_hash strings that had merges done.
     """
     # Step 1: Find `positions` that have multiple game_hashes
     cursor: sqlite3.Cursor = self._conn.execute("""
@@ -1322,12 +1324,13 @@ class PGNData:
       # we'll store groups of duplicates and produce a unified header for each group
       potential_games: list[tuple[str, list[int], dict[str, str], ErrorGameCategory]] = []
       for gh in all_gs:
-        g_info: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory, Optional[str], Optional[str]]] = self._GetGame(gh)
+        g_info: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
+                               Optional[str], Optional[str]]] = self._GetGame(gh)
         if not g_info:
           raise ValueError(f'Game {gh!r} not found!')
         _, plys_list, game_headers, err_cat, _, _ = g_info
         potential_games.append((gh, plys_list, game_headers, err_cat))
-      # a naive approach: for each pair, check if "IsDuplicateGame(...)" says duplicates
+      # Step 2b: form groups of duplicates
       visited: set[str] = set()
       duplicates_found: list[set[str]] = []  # [(set_of_hashes, merged_header)]
       for i in range(len(potential_games)):  # pylint: disable=consider-using-enumerate
@@ -1348,22 +1351,27 @@ class PGNData:
             group.add(gh_b)
         if len(group) > 1:
           duplicates_found.append(group)
-      # Step 3: for each group of duplicates found, record them
+      # Step 3: store duplicates
       for group in duplicates_found:
         merges_done.append(position_hash)
-        # record duplicates in table 'duplicate_games' for all but the first
-        # or whichever logic you want to keep as the “primary”
-        temp_group: set[str] = set(group)
-        primary_hash: str = temp_group.pop()
-        # TODO: we MUST make sure that primary_hash is always the same!
+        # pick a stable primary, e.g. lexicographically smallest
+        sorted_list: list[str] = sorted(group)
+        primary_hash: str = sorted_list[0]
         with self._conn:
-          for dgh in temp_group:
+          # unify the chain if 'primary_hash' itself is a duplicate of something else
+          top_primary: str = self._FindTopPrimary(primary_hash)
+          # now link every other hash in the group to top_primary
+          for dgh in group:
+            if dgh == top_primary:
+              continue
+            # read game from DB
             d_game: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
                                    Optional[str], Optional[str]]] = self._GetGame(dgh)
             if d_game is None:
               raise ValueError(f'Duplicate game {dgh!r} not found!')
-            self._InsertDuplicateGame(dgh, primary_hash, d_game[2])
-            known_duplicates.add(dgh)  # avoid re-processing
+            # record in duplicate_games
+            self._InsertDuplicateGame(dgh, top_primary, d_game[2])
+            known_duplicates.add(dgh)
     # end
     return merges_done
 
