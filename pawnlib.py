@@ -41,7 +41,6 @@ __version__ = (1, 0)
 
 # PGN cache directory
 _PGN_CACHE_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-cache')
-_PGN_CACHE_FILE: str = os.path.join(_PGN_CACHE_DIR, 'cache.bin')
 
 # PGN data directory
 _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
@@ -578,10 +577,10 @@ def FindBestMove(
 
 def _WorkerProcessEvalTask(
     worker_n: int, db_readonly: bool, tasks: multiprocessing.queues.Queue,  # type:ignore
-    depth: int, engine_path: str, timeout: float,
+    depth: int, engine_path: str, timeout: float, log_dir: str,
     tasks_done: multiprocessing.managers.DictProxy) -> None:  # type:ignore
   """Worker function that runs in a separate process or thread to evaluate chess positions."""
-  if not tasks or not engine_path:
+  if not tasks or not engine_path or not log_dir or not os.path.isdir(log_dir):
     raise ValueError('Empty parameters!')
   if depth < ELO_CATEGORY_TO_PLY['club']:
     raise ValueError(f'ply depth should be at least {ELO_CATEGORY_TO_PLY["club"]}')
@@ -592,9 +591,9 @@ def _WorkerProcessEvalTask(
   p_eval: Optional[tuple[chess.Move, PositionEval]]
   db = PGNData(readonly=db_readonly)
   try:
-    # only once: open Stockfish/engine in UCI mode, also append to a log file in _PGN_DATA_DIR
+    # only once: open Stockfish/engine in UCI mode, also append to a log file
     with (chess.engine.SimpleEngine.popen_uci(engine_path) as engine,
-          open(os.path.join(_PGN_DATA_DIR, f'worker-{worker_n}.logs'),
+          open(os.path.join(log_dir, f'worker-{worker_n:02}.logs'),
                'at', encoding='utf-8') as file_obj):
       # main loop: pick up a task and execute it
       file_obj.write(f'\n\nStarting worker thread #{worker_n} @ {base.STR_TIME()}\n\n')
@@ -639,7 +638,7 @@ def _WorkerProcessEvalTask(
 
 def RunEvalWorkers(
     num_workers: int, db_readonly: bool, tasks: list[str], timeout: float,
-    depth: int, engine_path: str) -> None:
+    depth: int, engine_path: str, log_path: str = _PGN_DATA_DIR) -> None:
   """Spawns multiple worker processes to process list of (fen_string, position_hash) tasks.
 
   Each worker calls WorkerProcessEvalTask(...) in a new process.
@@ -651,6 +650,7 @@ def RunEvalWorkers(
     timeout: seconds until worker timeout
     depth: ply depth to search
     engine_path: the engine path to invoke
+    log_path: (default _PGN_DATA_DIR) the (existing!) path to save log files to
   """
   # get number of tasks: unfortunately Queue() can't handle more than ~10000 items
   # so we have to feed them to the queue either individually or in groups
@@ -673,8 +673,9 @@ def RunEvalWorkers(
     for i in range(num_workers):
       tasks_done[i] = 0
       worker_thread = multiprocessing.Process(
-          target=_WorkerProcessEvalTask,                                               # type:ignore
-          args=(i, db_readonly, eval_queue, depth, engine_path, timeout, tasks_done))  # type:ignore
+          target=_WorkerProcessEvalTask,  # type:ignore
+          args=(i, db_readonly, eval_queue, depth, engine_path,
+                timeout, log_path, tasks_done))  # type:ignore
       worker_thread.start()
       processes.append(worker_thread)
     logging.info('Spawned %d engine eval workers with depth %d', num_workers, depth)
@@ -735,17 +736,21 @@ class PGNCache:
     """A cache mapping to be saved to disk."""
     files: dict[str, str]  # {URL(lowercase): file_path}
 
-  def __init__(self) -> None:
+  def __init__(self, cache_dir: str = _PGN_CACHE_DIR, cache_filename: str = 'cache.bin') -> None:
     """Constructor."""
+    self._cache_dir: str = cache_dir.strip()
+    if not self._cache_dir:
+      raise ValueError('Empty cache dir')
+    self._cache_file: str = os.path.join(self._cache_dir, cache_filename)
     # check cache directory is there
-    if not os.path.exists(_PGN_CACHE_DIR):
-      os.makedirs(_PGN_CACHE_DIR)
-      logging.info('Created empty PGN cache dir %r', _PGN_CACHE_DIR)
+    if not os.path.exists(self._cache_dir):
+      os.makedirs(self._cache_dir)
+      logging.info('Created empty PGN cache dir %r', self._cache_dir)
     # load cache file, create if empty
     self._cache: PGNCache._Cache = PGNCache._Cache(files={})
-    if os.path.exists(_PGN_CACHE_FILE):
-      self._cache = base.BinDeSerialize(file_path=_PGN_CACHE_FILE)
-      logging.info('Loaded cache from %r with %d entries', _PGN_CACHE_FILE, len(self._cache.files))
+    if os.path.exists(self._cache_file):
+      self._cache = base.BinDeSerialize(file_path=self._cache_file)
+      logging.info('Loaded cache from %r with %d entries', self._cache_file, len(self._cache.files))
     else:
       logging.info('No cache file to load yet')
 
@@ -761,11 +766,11 @@ class PGNCache:
     file_obj.seek(0)
     hex_hash: str = hashlib.sha256(file_obj.read()).hexdigest().lower()
     file_obj.seek(0)
-    file_path: str = os.path.join(_PGN_CACHE_DIR, f'{hex_hash}.pgn')
+    file_path: str = os.path.join(self._cache_dir, f'{hex_hash}.pgn')
     with open(file_path, 'wb') as cached_obj:
       cached_obj.write(file_obj.read())
     self._cache.files[file_url.lower()] = file_path
-    base.BinSerialize(self._cache, _PGN_CACHE_FILE)
+    base.BinSerialize(self._cache, self._cache_file)
     logging.info('Added URL %r to cache (%r)', file_url, file_path)
     return file_path
 
@@ -830,33 +835,39 @@ class PGNData:
 
   }
 
-  def __init__(self, readonly: bool = False) -> None:
+  def __init__(self, db_path: str = _PGN_SQL_FILE, readonly: bool = False) -> None:
     """Open or create the SQLite DB.
 
     Args:
       readonly: (default: False) if True DB will not save data
     """
+    self._db_path: str = db_path.strip()
+    if not self._db_path:
+      raise ValueError('Empty DB path')
+    self._db_dir: str = os.path.split(self._db_path)[0]
+    if not self._db_dir:
+      raise ValueError(f'Empty DB dir for {self._db_path}')
     self._readonly: bool = bool(readonly)
     # check data directory is there
-    if not os.path.exists(_PGN_DATA_DIR):
+    if not os.path.exists(self._db_dir):
       if self._readonly:
         raise ValueError('No data path and READONLY do not mix')
-      os.makedirs(_PGN_DATA_DIR)
-      logging.info('Created empty data dir %r', _PGN_DATA_DIR)
+      os.makedirs(self._db_dir)
+      logging.info('Created empty data dir %r', self._db_dir)
     # open DB, create if empty
-    exists_db: bool = os.path.exists(_PGN_SQL_FILE)
+    exists_db: bool = os.path.exists(self._db_path)
     # self._conn: sqlite3.Connection = sqlite3.connect(
-    #     f'file:{_PGN_SQL_FILE}{"?mode=ro" if self._readonly else ""}', uri=True)
-    self._conn: sqlite3.Connection = sqlite3.connect(_PGN_SQL_FILE)
+    #     f'file:{self._db_path}{"?mode=ro" if self._readonly else ""}', uri=True)
+    self._conn: sqlite3.Connection = sqlite3.connect(self._db_path)
     self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
     self._known_hashes: Optional[set[str]] = None    # lazy hashes cache
     if exists_db:
       logging.info(
-          'Opening %sSQLite DB in %r', 'READONLY ' if self._readonly else '', _PGN_SQL_FILE)
+          'Opening %sSQLite DB in %r', 'READONLY ' if self._readonly else '', self._db_path)
     else:
       if self._readonly:
         raise ValueError('Empty database and READONLY do not mix')
-      logging.info('Creating new SQLite DB in %r', _PGN_SQL_FILE)
+      logging.info('Creating new SQLite DB in %r', self._db_path)
       self._EnsureSchema()
       logging.info('Adding standard chess base position...')
       with self._conn:
@@ -900,9 +911,9 @@ class PGNData:
     if self._readonly:
       return
     self._conn.close()
-    if os.path.exists(_PGN_SQL_FILE):
-      os.remove(_PGN_SQL_FILE)
-      logging.warning('Deleted database file %r', _PGN_SQL_FILE)
+    if os.path.exists(self._db_path):
+      os.remove(self._db_path)
+      logging.warning('Deleted database file %r', self._db_path)
 
   def WipeData(self) -> None:
     """Delete all data and data file."""
