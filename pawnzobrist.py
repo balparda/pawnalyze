@@ -5,7 +5,8 @@
 #
 """Pawnalyze base library of util methods and classes."""
 
-from typing import Callable
+# import pdb
+from typing import Any, Callable
 
 import chess
 import chess.pgn
@@ -28,34 +29,54 @@ class Zobrist:
 
   def __init__(self, h: int) -> None:
     """Constructor."""
-    self.hash: int = h
+    self._hash: int = h
 
   def __str__(self) -> str:
-    return f'{self.hash:032x}'
+    """String representation."""
+    return f'{self._hash:032x}'
+
+  def __hash__(self) -> int:
+    """Internal hash. Do not use as alias/substitute for self._hash!!"""
+    return self._hash
+
+  def __eq__(self, other: Any) -> bool:
+    """Defines equality with other Zobrist, int, or string."""
+    if isinstance(other, Zobrist):
+      return self._hash == other._hash
+    if isinstance(other, int):
+      return self._hash == other
+    if isinstance(other, str):
+      return str(self) == other
+    return False
 
 
 ZobristFromHash: Callable[[str], Zobrist] = lambda h: Zobrist(int(h, 16))
 
 ZobristFromBoard: Callable[[chess.Board], Zobrist] = lambda b: Zobrist(Zobrist.MakeHasher()(b))
 
+ZobristFromFEN: Callable[[str], Zobrist] = lambda f: ZobristFromBoard(chess.Board(f))
+
 
 ####################################################################################################
 
 
-def ZobristGenerateTable() -> None:
-  """Print the (fixed) random array to use in the code below."""
+def ZobristGenerateTable() -> tuple[str, str]:
+  """Print the (fixed) random array to use in the code below. Returns the last hex pair."""
   # generate the 32-bytes long SHA-256
   internal_hash: bytes = base.BytesBinHash(_SEED)
   print()
   print('_PAWNALYZE_ZOBRIST_RANDOM_ARRAY: list[int] = [  # 781+ random integers')
+  a: str = ''
+  b: str = ''
   for _ in range(782 // 2):  # 782 to be even
-    a: str = internal_hash.hex()[32:]
+    a = internal_hash.hex()[32:]
     internal_hash = base.BytesBinHash(internal_hash)
-    b: str = internal_hash.hex()[32:]
+    b = internal_hash.hex()[32:]
     internal_hash = base.BytesBinHash(internal_hash)
     print(f'    0x{a}, 0x{b},')
   print(']')
   print()
+  return (a, b)
 
 
 # we redefine a 128bit Zobrist by having 781+ 128bit random numbers

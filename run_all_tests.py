@@ -10,15 +10,21 @@ import types
 
 from baselib import base
 from pawnalyze import pawnlib_test
+from pawnalyze import pawnenginemoves_test
 from pawnalyze import pawningest_test
+from pawnalyze import pawnmaintain_test
+from pawnalyze import pawnzobrist_test
 
 __author__ = 'balparda@gmail.com (Daniel Balparda)'
 __version__ = (1, 0)
 
 
 _TEST_MODULES_TO_RUN: list[types.ModuleType] = [
+    pawnzobrist_test,
     pawnlib_test,
     pawningest_test,
+    pawnmaintain_test,
+    pawnenginemoves_test,
 ]
 
 
