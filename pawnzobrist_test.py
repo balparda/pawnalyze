@@ -46,6 +46,8 @@ class TestPawnZobrist(unittest.TestCase):
         'ce1e8b345ac1a8796d3c511a186b4e34')
     self.assertTrue(base_hash != 'ce1e8b345ac1a8796d3c511a186b4e34')
     self.assertTrue(base_hash != set())
+    with self.assertRaisesRegex(ValueError, 'must be initialized with int'):
+      pawnzobrist.Zobrist('ce1e8b345ac1a8796d3c511a186b4e34')  # type: ignore
 
 
 SUITE: unittest.TestSuite = unittest.TestLoader().loadTestsFromTestCase(TestPawnZobrist)
