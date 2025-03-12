@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pawnalyze"
 version = "1.0"
 description = "Parse and analyze historical chess games: frequencies, trends, player styles, etc"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 
 [project.dependencies]
 chess = ">=1.11.2"

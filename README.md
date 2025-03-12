@@ -159,9 +159,24 @@ As our analysis grows, we must ensure the system can scale and handle the data v
 ### Dependencies
 
 ```sh
-$ [sudo] pip3 install python-chess litecli py7zr # pandas numpy
-$ python3 -m pip install python-chess litecli py7zr
-$ brew install db-browser-for-sqlite
+brew install db-browser-for-sqlite
+
+cd pawnalyze
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+(or)
+pip install .
+```
+
+For a completely isolated environment (including the Python interpreter, OS libs, etc.), you can
+build a Docker image:
+
+```sh
+docker build -t pawnalyze .
+docker run --rm -it -v /path/to/huge-db:/app/.pawnalyze-data pawnalyze:latest
+docker run --rm -it -v /path/to/huge-db:/app/.pawnalyze-data pawnalyze:latest python pawnmaintain.py
 ```
 
 https://python-chess.readthedocs.io/en/latest/
