@@ -1515,7 +1515,8 @@ class PGNData:
         logging.info(
             'Loaded %d lines, %d games (%d plys, %d nodes, %0.1f%%) '
             '%0.1f games/s %0.1f plys/s = %s per M-games',
-            n_line, game_count, ply_count, node_count,
+            base.HumanizedDecimal(n_line), base.HumanizedDecimal(game_count),
+            base.HumanizedDecimal(ply_count), base.HumanizedDecimal(node_count),
             (100.0 * (actual_loaded_count - node_count) / actual_loaded_count) if actual_loaded_count else 0,
             _PRINT_EVERY_N / delta, (actual_loaded_count - last_ply) / delta,
             base.HumanizedSeconds(1000000.0 * total_time / actual_game_count) if actual_game_count else '?')
