@@ -73,7 +73,8 @@ def Main() -> None:
         print(f'{changed_data} games deduplicated')
         print()
         print('Starting DB check')
-        database.PrintDatabaseCheck()
+        for line in database.PrintDatabaseCheck():
+          print(line)
         print('DB check ended')
       print()
       print(f'Executed in {base.TERM_GREEN}{op_timer.readable}{base.TERM_END}')

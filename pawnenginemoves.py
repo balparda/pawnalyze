@@ -60,10 +60,12 @@ def AddEvaluationsOfRepeatPositionsToDB(
     if len(all_jobs) > num_tasks:
       break
   print()
-  print(f'Total: {len(all_jobs)} positions to evaluate; STARTING threads to evaluate them')
+  print(f'Total: {len(all_jobs)} positions to evaluate; '
+        f'STARTING {num_threads} threads to evaluate them')
   print()
   pawnlib.RunEvalWorkers(
-      num_threads, database.is_readonly, all_jobs, _WORKER_TIMEOUT_SECONDS, depth, engine_command)
+      num_threads, database.is_readonly, all_jobs, _WORKER_TIMEOUT_SECONDS, depth,
+      engine_command, database.db_dir, database.db_path)
 
 
 def AddEvaluationsOfPositionsToDB(
@@ -72,9 +74,10 @@ def AddEvaluationsOfPositionsToDB(
   """Adds engine evaluations of final positions to chess DB. Multithreaded and efficient."""
   all_jobs: list[str] = [str(r[0]) for r in database.GetPositions(
       has_eval=False, has_game=final_node, limit=num_tasks)]
-  print(f'Total: {len(all_jobs)} positions; STARTING threads to evaluate them')
+  print(f'Total: {len(all_jobs)} positions; STARTING {num_threads} threads to evaluate them')
   pawnlib.RunEvalWorkers(
-      num_threads, database.is_readonly, all_jobs, _WORKER_TIMEOUT_SECONDS, depth, engine_command)
+      num_threads, database.is_readonly, all_jobs, _WORKER_TIMEOUT_SECONDS, depth,
+      engine_command, database.db_dir, database.db_path)
 
 
 def Main() -> None:

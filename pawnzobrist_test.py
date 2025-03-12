@@ -6,12 +6,14 @@
 # pylint: disable=invalid-name,protected-access
 """pawnzobrist.py unittest."""
 
+import logging
 # import pdb
 import unittest
 
 import chess
 import chess.pgn
 
+from baselib import base
 from pawnalyze import pawnzobrist
 
 __author__ = 'balparda@gmail.com (Daniel Balparda)'
@@ -33,6 +35,7 @@ class TestPawnZobrist(unittest.TestCase):
     base_str: str = '3a653200920c4adb562ceff24c6af691'  # starting board position
     base_hash: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(chess.pgn.Game().board())
     self.assertEqual(str(base_hash), base_str)
+    self.assertEqual(repr(base_hash), 'Zobrist("3a653200920c4adb562ceff24c6af691")')
     another_base: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(base_str)
     self.assertTrue(base_hash == another_base)
     self.assertTrue(base_hash == int(base_str, 16))
@@ -49,4 +52,5 @@ SUITE: unittest.TestSuite = unittest.TestLoader().loadTestsFromTestCase(TestPawn
 
 
 if __name__ == '__main__':
+  logging.basicConfig(level=logging.INFO, format=base.LOG_FORMAT)  # set this as default
   unittest.main()

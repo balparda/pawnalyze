@@ -540,7 +540,7 @@ def FindBestMove(
   Returns:
     (best_move, PositionEval), where best_move is a chess.Move and see PositionEval for details
   """
-  if depth < 5:
+  if depth < 4:
     raise ValueError('Chess engine depth must be 5 or larger')
   # take care of checkmate case
   board = chess.Board(fen)
@@ -577,7 +577,7 @@ def FindBestMove(
 
 def _WorkerProcessEvalTask(
     worker_n: int, db_readonly: bool, tasks: multiprocessing.queues.Queue,  # type:ignore
-    depth: int, engine_path: str, timeout: float, log_dir: str,
+    depth: int, engine_path: str, timeout: float, log_dir: str, db_file: str,
     tasks_done: multiprocessing.managers.DictProxy) -> None:  # type:ignore
   """Worker function that runs in a separate process or thread to evaluate chess positions."""
   if not tasks or not engine_path or not log_dir or not os.path.isdir(log_dir):
@@ -589,7 +589,7 @@ def _WorkerProcessEvalTask(
   task: set[str]
   p_hash: str = ''
   p_eval: Optional[tuple[chess.Move, PositionEval]]
-  db = PGNData(readonly=db_readonly)
+  db = PGNData(db_path=db_file, readonly=db_readonly)
   try:
     # only once: open Stockfish/engine in UCI mode, also append to a log file
     with (chess.engine.SimpleEngine.popen_uci(engine_path) as engine,
@@ -603,7 +603,7 @@ def _WorkerProcessEvalTask(
           task = tasks.get(timeout=timeout)  # type:ignore
           for p_hash in task:                # type:ignore
             if p_hash == _WORKER_SENTINEL_MESSAGE:  # sentinel to stop
-              file_obj.write('Worker #{worker_n} received sentinel, exiting.\n\n')
+              file_obj.write(f'Worker #{worker_n} received sentinel, exiting.\n\n')
               break
             # we have a task: evaluate and save
             position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
@@ -638,7 +638,7 @@ def _WorkerProcessEvalTask(
 
 def RunEvalWorkers(
     num_workers: int, db_readonly: bool, tasks: list[str], timeout: float,
-    depth: int, engine_path: str, log_path: str = _PGN_DATA_DIR) -> None:
+    depth: int, engine_path: str, log_dir: str, db_file: str) -> None:
   """Spawns multiple worker processes to process list of (fen_string, position_hash) tasks.
 
   Each worker calls WorkerProcessEvalTask(...) in a new process.
@@ -650,10 +650,12 @@ def RunEvalWorkers(
     timeout: seconds until worker timeout
     depth: ply depth to search
     engine_path: the engine path to invoke
-    log_path: (default _PGN_DATA_DIR) the (existing!) path to save log files to
+    log_dir: the (existing!) path to save log files to
+    db_file: the (existing!) file path to the DB to use
   """
   # get number of tasks: unfortunately Queue() can't handle more than ~10000 items
   # so we have to feed them to the queue either individually or in groups
+  local: bool = num_workers == 1
   n_tasks: int = len(tasks)
   set_tasks: list[set[str]] = []
   tasks_per_queue_item: int = (n_tasks // 10000) + 1
@@ -665,31 +667,35 @@ def RunEvalWorkers(
         new_task.add(tasks[i + j])
     eval_queue.put(new_task)  # type:ignore
     set_tasks.append(new_task)
+  if local:
+    eval_queue.put({_WORKER_SENTINEL_MESSAGE})  # type:ignore
   logging.info('Enqueued %d positions (%d tasks) for engine evaluation', n_tasks, len(set_tasks))
   # create worker processes
   processes: list[multiprocessing.Process] = []
   with multiprocessing.Manager() as manager:
     tasks_done: multiprocessing.managers.DictProxy = manager.dict()  # {worker: count_done}  # type:ignore
+    logging.info('Spawning %d engine eval workers with depth %d', num_workers, depth)
     for i in range(num_workers):
       tasks_done[i] = 0
-      worker_thread = multiprocessing.Process(
-          target=_WorkerProcessEvalTask,  # type:ignore
-          args=(i, db_readonly, eval_queue, depth, engine_path,
-                timeout, log_path, tasks_done))  # type:ignore
-      worker_thread.start()
-      processes.append(worker_thread)
-    logging.info('Spawned %d engine eval workers with depth %d', num_workers, depth)
-    time.sleep(1)
+      process_args: tuple[int, bool, multiprocessing.queues.Queue,                            # type:ignore
+                          int, str, float, str, str, multiprocessing.managers.DictProxy] = (  # type:ignore
+                              i, db_readonly, eval_queue,
+                              depth, engine_path, timeout, log_dir, db_file, tasks_done)
+      if local:
+        _WorkerProcessEvalTask(*process_args)
+      else:
+        worker_thread = multiprocessing.Process(target=_WorkerProcessEvalTask, args=process_args)  # type:ignore
+        processes.append(worker_thread)
+    for thread in processes:
+      thread.start()
     # monitor queue size
     progress_bar: tqdm.tqdm = tqdm.tqdm(
         total=len(tasks), mininterval=1.0, miniters=1, unit='ev', smoothing=0.4, colour='green')
     last_done: int = 0
     try:
-      while (n_tasks - last_done) > num_workers:
+      while not local and (n_tasks - last_done) > num_workers:
         queue_done: int = sum(tasks_done.values())  # type:ignore
-        delta: int = queue_done - last_done
-        if delta:
-          progress_bar.update(delta)
+        progress_bar.update(queue_done - last_done)
         last_done = queue_done
         time.sleep(1)
     finally:
@@ -726,6 +732,20 @@ def _UnzipSevenZFile(in_file: str, out_file: IO[Any]) -> None:
       for _, file_obj in files.items():
         out_file.write(file_obj.read())
         break
+
+
+def ZipFileInMemory(original_path: str) -> bytes:
+  """Read disk file and compress it into a ZIP file (with only one file in it) in memory."""
+  # read binary data from the original file
+  with open(original_path, 'rb') as f:
+    file_data: bytes = f.read()
+  zip_buffer = io.BytesIO()
+  # create a ZIP archive in memory
+  with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+    # The second argument is how it will appear inside the ZIP
+    zf.writestr('single_file.bin', file_data)
+  # get the raw bytes of the zip file
+  return zip_buffer.getvalue()
 
 
 class PGNCache:
@@ -841,33 +861,33 @@ class PGNData:
     Args:
       readonly: (default: False) if True DB will not save data
     """
-    self._db_path: str = db_path.strip()
-    if not self._db_path:
+    self.db_path: str = db_path.strip()
+    if not self.db_path:
       raise ValueError('Empty DB path')
-    self._db_dir: str = os.path.split(self._db_path)[0]
-    if not self._db_dir:
-      raise ValueError(f'Empty DB dir for {self._db_path}')
+    self.db_dir: str = os.path.split(self.db_path)[0]
+    if not self.db_dir:
+      raise ValueError(f'Empty DB dir for {self.db_path}')
     self._readonly: bool = bool(readonly)
     # check data directory is there
-    if not os.path.exists(self._db_dir):
+    if not os.path.exists(self.db_dir):
       if self._readonly:
         raise ValueError('No data path and READONLY do not mix')
-      os.makedirs(self._db_dir)
-      logging.info('Created empty data dir %r', self._db_dir)
+      os.makedirs(self.db_dir)
+      logging.info('Created empty data dir %r', self.db_dir)
     # open DB, create if empty
-    exists_db: bool = os.path.exists(self._db_path)
+    exists_db: bool = os.path.exists(self.db_path)
     # self._conn: sqlite3.Connection = sqlite3.connect(
     #     f'file:{self._db_path}{"?mode=ro" if self._readonly else ""}', uri=True)
-    self._conn: sqlite3.Connection = sqlite3.connect(self._db_path)
+    self._conn: sqlite3.Connection = sqlite3.connect(self.db_path)
     self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
     self._known_hashes: Optional[set[str]] = None    # lazy hashes cache
     if exists_db:
       logging.info(
-          'Opening %sSQLite DB in %r', 'READONLY ' if self._readonly else '', self._db_path)
+          'Opening %sSQLite DB in %r', 'READONLY ' if self._readonly else '', self.db_path)
     else:
       if self._readonly:
         raise ValueError('Empty database and READONLY do not mix')
-      logging.info('Creating new SQLite DB in %r', self._db_path)
+      logging.info('Creating new SQLite DB in %r', self.db_path)
       self._EnsureSchema()
       logging.info('Adding standard chess base position...')
       with self._conn:
@@ -911,9 +931,9 @@ class PGNData:
     if self._readonly:
       return
     self._conn.close()
-    if os.path.exists(self._db_path):
-      os.remove(self._db_path)
-      logging.warning('Deleted database file %r', self._db_path)
+    if os.path.exists(self.db_path):
+      os.remove(self.db_path)
+      logging.warning('Deleted database file %r', self.db_path)
 
   def WipeData(self) -> None:
     """Delete all data and data file."""
@@ -973,7 +993,7 @@ class PGNData:
            ','.join(sorted(existing_hashes_set)), str(position_hash)))
     return False
 
-  def _GetPosition(
+  def GetPosition(
       self, position_hash: pawnzobrist.Zobrist) -> Optional[
           tuple[PositionFlag, set[ExtraInsightPositionFlag], Optional[PositionEval], set[str]]]:
     """Retrieve the PositionFlag for the given hash. Returns None if not found."""
@@ -1006,7 +1026,7 @@ class PGNData:
              None if s is None else DecodeEval(s),
              set() if h is None else set(h.split(',')))
 
-  def _GetPositionsWithGamesOrNot(self) -> tuple[set[str], set[str]]:
+  def GetPositionsWithGamesOrNot(self) -> tuple[set[str], set[str]]:
     """Return a set{position_hash} for positions with games and set{position_hash} without games."""
     positions_with_games: set[str] = set()
     positions_without_games: set[str] = set()
@@ -1052,7 +1072,7 @@ class PGNData:
       """, (game_hash, str(STARTING_POSITION_HASH), '-', json.dumps(game_headers),
             error_category.value, error_pgn, error_message))
 
-  def _GetGame(self, game_hash: str) -> Optional[
+  def GetGame(self, game_hash: str) -> Optional[
       tuple[pawnzobrist.Zobrist, list[int], dict[str, str],
             ErrorGameCategory, Optional[str], Optional[str]]]:
     """Return game (zobrist, plys, header, err_car, err_pgn, err_message) for game_hash; None if not found."""
@@ -1078,7 +1098,7 @@ class PGNData:
     headers: dict[str, str] = json.loads(row[0])
     return headers
 
-  def _GetAllGames(self) -> Generator[
+  def GetAllGames(self) -> Generator[
       tuple[str, pawnzobrist.Zobrist, list[int], dict[str, str],
             ErrorGameCategory, Optional[str], Optional[str]], None, None]:
     """Yields all games as (hash, zobrist, plys, header, err_car, err_pgn, err_message)."""
@@ -1096,7 +1116,7 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM games;')
     return {h[0] for h in cursor}  # stream into set
 
-  def _GetAllOKAndErrorGames(self) -> tuple[dict[str, str], set[str]]:
+  def GetAllOKAndErrorGames(self) -> tuple[dict[str, str], set[str]]:
     """"Gets all OK games as a dict {game_hash: end_position} and all error as set {game_hash}."""
     ok_games: dict[str, str] = {}  # {game_hash: end_position}
     error_games: set[str] = set()  # {game_hash}
@@ -1130,20 +1150,20 @@ class PGNData:
           (game_hash, duplicate_of, json.dumps(game_headers)))
       self._conn.execute('DELETE FROM games WHERE game_hash = ?', (game_hash,))
 
-  def _GetDuplicateGame(self, game_hash: str) -> Optional[tuple[str, dict[str, str]]]:
+  def GetDuplicateGame(self, game_hash: str) -> Optional[tuple[str, dict[str, str]]]:
     """Return duplicate for `game_hash` as hash into `games` table; None if not found."""
     cursor: sqlite3.Cursor = self._conn.execute(
         'SELECT duplicate_of, game_headers FROM duplicate_games WHERE game_hash = ?;', (game_hash,))
     row: Optional[tuple[str, str]] = cursor.fetchone()  # primary key == game_hash
     return None if not row else (row[0], json.loads(row[1]))
 
-  def _GetDuplicatesOf(self, duplicate_of: str) -> set[str]:
+  def GetDuplicatesOf(self, duplicate_of: str) -> set[str]:
     """Return a set of duplicates `game_hash` for the given actual `game_hash`."""
     cursor: sqlite3.Cursor = self._conn.execute(
         'SELECT game_hash FROM duplicate_games WHERE duplicate_of = ?;', (duplicate_of,))
     return {g[0] for g in cursor.fetchall()}  # non-stream
 
-  def _FindTopPrimary(self, game_hash: str) -> str:
+  def FindTopPrimary(self, game_hash: str) -> str:
     """Follow 'duplicate_of' references to find top-most `game_hash`. If none, return game_hash."""
     while True:
       row: Optional[tuple[str]] = self._conn.execute(
@@ -1158,7 +1178,7 @@ class PGNData:
     cursor: sqlite3.Cursor = self._conn.execute('SELECT game_hash FROM duplicate_games;')
     return {h[0] for h in cursor}  # stream into set
 
-  def _GetDuplicatesDict(self) -> dict[str, str]:
+  def GetDuplicatesDict(self) -> dict[str, str]:
     """Return all duplicates as a dict {game_hash: duplicate_of}."""
     return dict(self._conn.execute('SELECT game_hash, duplicate_of FROM duplicate_games'))  # stream cursor
 
@@ -1192,7 +1212,7 @@ class PGNData:
           'INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash) VALUES(?, ?, ?)',
           (str(from_hash), ply, str(to_hash)))
 
-  def _GetMoves(
+  def GetMoves(
       self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, pawnzobrist.Zobrist]]:
     """Return a list of (ply, to_position_hash) for the given from_position_hash."""
     cursor: sqlite3.Cursor = self._conn.execute("""
@@ -1305,7 +1325,7 @@ class PGNData:
         flags: PositionFlag = PositionFlag(PositionFlag.WHITE_TO_MOVE)
         extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
         # hashes cache was loaded at startup, so we still have to re-check before we process/insert
-        if (done_game := self._GetGame(game_hash)):
+        if (done_game := self.GetGame(game_hash)):
           # we already did this game; nothing to do
           return (game_hash, len(done_game[1]), 0)
         # test for games we don't know the result of
@@ -1347,7 +1367,8 @@ class PGNData:
       return (game_hash, 0, 0)
 
   def DeduplicateGames(
-      self, soft_ply_threshold: int, hard_ply_threshold: int) -> list[str]:
+      self, soft_ply_threshold: int,
+      hard_ply_threshold: int) -> list[tuple[str, str, dict[str, str]]]:
     """Deduplicate games.
 
     Finds positions in `positions` table that have multiple game_hashes and attempts
@@ -1371,7 +1392,7 @@ class PGNData:
     rows: list[tuple[str, str]] = cursor.fetchall()
     # we'll need to skip game_hashes already in duplicate_games:
     known_duplicates: set[str] = self.GetAllDuplicateHashes()
-    merges_done: list[str] = []  # the return with info on merges we'll do
+    merges_done: list[tuple[str, str, dict[str, str]]] = []  # the return with info on merges we'll do
     # go over the games that have ending positions with more than one hash
     for position_hash, g_hashes_str in rows:
       if position_hash == starting_position:
@@ -1385,7 +1406,7 @@ class PGNData:
       potential_games: list[tuple[str, list[int], dict[str, str]]] = []
       for gh in all_gs:
         g_info: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
-                               Optional[str], Optional[str]]] = self._GetGame(gh)
+                               Optional[str], Optional[str]]] = self.GetGame(gh)
         if not g_info:
           raise ValueError(f'Game {gh!r} not found!')
         _, plys_list, game_headers, err_cat, _, _ = g_info
@@ -1415,24 +1436,24 @@ class PGNData:
           duplicates_found.append(group)
       # Step 3: store duplicates
       for group in duplicates_found:
-        merges_done.append(position_hash)
         # pick a stable primary, e.g. lexicographically smallest
         sorted_list: list[str] = sorted(group)
         primary_hash: str = sorted_list[0]
         with self._conn:
           # unify the chain if 'primary_hash' itself is a duplicate of something else
-          top_primary: str = self._FindTopPrimary(primary_hash)
+          top_primary: str = self.FindTopPrimary(primary_hash)
           # now link every other hash in the group to top_primary
           for dgh in group:
             if dgh == top_primary:
               continue
             # read game from DB
             d_game: Optional[tuple[pawnzobrist.Zobrist, list[int], dict[str, str], ErrorGameCategory,
-                                   Optional[str], Optional[str]]] = self._GetGame(dgh)
+                                   Optional[str], Optional[str]]] = self.GetGame(dgh)
             if d_game is None:
               raise ValueError(f'Duplicate game {dgh!r} not found!')
             # record in duplicate_games
             self._InsertDuplicateGame(dgh, top_primary, d_game[2])
+            merges_done.append((dgh, top_primary, d_game[2]))
             known_duplicates.add(dgh)
     # end
     return merges_done
@@ -1502,7 +1523,7 @@ class PGNData:
         last_ply = actual_loaded_count
       yield (game_count, game_hash, plys, pgn, game)
 
-  def PrintDatabaseCheck(self) -> None:
+  def PrintDatabaseCheck(self) -> Generator[str, None, None]:
     """
     Does a complete check of the database, prints stats and any errors.
 
@@ -1513,35 +1534,35 @@ class PGNData:
       (4) traverse the moves tree from the root to find unreachable or invalid leaf positions
     """
     # (1) read all games from `games`
-    print('Reading all games...')
-    ok_games, error_games = self._GetAllOKAndErrorGames()
-    print(f'{len(ok_games)} ok games and {len(error_games)} error games in database')
-    print()
+    yield 'Reading all games...'
+    ok_games, error_games = self.GetAllOKAndErrorGames()
+    yield f'{len(ok_games)} ok games and {len(error_games)} error games in database'
+    yield ''
     # (2) get all duplicates from `duplicate_games`, do some basic checks
-    print('Reading all duplicate games...')
-    dup_map: dict[str, str] = self._GetDuplicatesDict()
+    yield 'Reading all duplicate games...'
+    dup_map: dict[str, str] = self.GetDuplicatesDict()
     dup_keys: set[str] = set(dup_map.keys())
     dup_ok_repeats: set[str] = dup_keys.intersection(ok_games.keys())
     dup_err_repeats: set[str] = dup_keys.intersection(error_games)
-    print(f'{len(dup_map)} duplicate games')
+    yield f'{len(dup_map)} duplicate games'
     if dup_ok_repeats:
-      print(f'==> Found {len(dup_ok_repeats)} keys both in OK `games` and `duplicate_games`: '
-            f'{dup_ok_repeats!r}')
+      yield (f'==> Found {len(dup_ok_repeats)} keys both in OK `games` and `duplicate_games`: '
+             f'{dup_ok_repeats!r}')
     if dup_err_repeats:
-      print(f'==> Found {len(dup_err_repeats)} keys both in error `games` and `duplicate_games`: '
-            f'{dup_err_repeats!r}')
-    print()
+      yield (f'==> Found {len(dup_err_repeats)} keys both in error `games` and `duplicate_games`: '
+             f'{dup_err_repeats!r}')
+    yield ''
     # (3) gather positions that do/don't have games
-    print('Reading all positions games...')
-    positions_with_games, positions_without_games = self._GetPositionsWithGamesOrNot()
+    yield 'Reading all positions games...'
+    positions_with_games, positions_without_games = self.GetPositionsWithGamesOrNot()
     n_all_positions: int = len(positions_with_games) + len(positions_without_games)
-    print(f'{n_all_positions} total positions, '
-          f'{len(positions_with_games)} with game endings, '
-          f'{len(positions_without_games)} en-passant (no game ended here)')
-    print()
+    yield (f'{n_all_positions} total positions, '
+           f'{len(positions_with_games)} with game endings, '
+           f'{len(positions_without_games)} en-passant (no game ended here)')
+    yield ''
     # (4) BFS/DFS from STARTING_POSITION_HASH to find reachable positions
     # we'll consider the move graph from positions -> moves -> positions
-    print('Visiting all positions...')
+    yield 'Visiting all positions...'
     visited_positions: set[str] = set()
     to_visit: set[str] = {str(STARTING_POSITION_HASH)}
     leaf_with_no_games: set[str] = set()
@@ -1570,9 +1591,9 @@ class PGNData:
     unreachable_positions: set[str] = (
         positions_with_games.union(positions_without_games) - visited_positions)
     if unreachable_positions:
-      print(f'==> Found {len(unreachable_positions)} unreachable positions: '
-            f'{unreachable_positions!r}')
+      yield (f'==> Found {len(unreachable_positions)} unreachable positions: '
+             f'{unreachable_positions!r}')
     if leaf_with_no_games:
-      print(f'==> Found {len(leaf_with_no_games)} leaf positions with no games: '
-            f'{leaf_with_no_games!r}')
-    print()
+      yield (f'==> Found {len(leaf_with_no_games)} leaf positions with no games: '
+             f'{leaf_with_no_games!r}')
+    yield ''

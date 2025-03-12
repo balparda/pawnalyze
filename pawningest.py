@@ -19,7 +19,7 @@ Typical usage:
   ./pawningest.py -f /path/to/local/games.pgn
     - Reads a local .pgn file and loads it into the DB.
 
-  ./pawningest.py -d /path/to/pgnfiles/
+  ./pawningest.py -d /path/to/pgn/files/
     - Recursively reads all .pgn files in the directory
       and ingests them.
 

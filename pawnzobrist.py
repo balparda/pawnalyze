@@ -29,11 +29,17 @@ class Zobrist:
 
   def __init__(self, h: int) -> None:
     """Constructor."""
+    if not isinstance(h, int):  # type:ignore
+      raise ValueError(f'Zobrist must be initialized with int! (got {h!r})')
     self._hash: int = h
 
   def __str__(self) -> str:
     """String representation."""
     return f'{self._hash:032x}'
+
+  def __repr__(self) -> str:
+    """Object representation."""
+    return f'Zobrist("{str(self)}")'
 
   def __hash__(self) -> int:
     """Internal hash. Do not use as alias/substitute for self._hash!!"""

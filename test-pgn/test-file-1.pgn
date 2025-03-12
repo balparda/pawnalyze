@@ -1,0 +1,383 @@
+
+[Event "WSCC Sting simul"]
+[Site "New York"]
+[Date "2000.06.29"]
+[Round "?"]
+[White "Kasparov, Garry"]
+[Black "Botti, Chris"]
+[Result "1-0"]
+[WhiteElo "2851"]
+[ECO "A01"]
+[EventDate "2000.06.29"]
+1.      b3      c5
+2.      Bb2     Nc6
+3.      g3      d6
+4.      Bg2     Nf6
+5.      c4      a6
+6.      Nc3     e5
+7.      d3      Nd4
+8.      e3      Bg4
+9.      Qd2     Nf5
+10.     Nge2    Bxe2
+11.     Qxe2    g6
+12.     Bxb7    Rb8
+13.     Bc6+    Nd7
+14.     O-O     Bg7
+15.     Bg2     O-O
+16.     Nd5     Nb6
+17.     Nxb6    Rxb6
+18.     Bh3     Qf6
+19.     f4      Rb4
+20.     fxe5    dxe5
+21.     e4      Qe7
+22.     exf5    Kh8
+23.     Rae1    Rbb8
+24.     f6      Bxf6
+25.     Rxf6    Qxf6
+26.     Bxe5    Qxe5
+27.     Qxe5+   Kg8
+28.     Bg2     Rbe8
+29.     Qxe8    Rxe8
+30.     Rxe8+   Kg7
+31.     Bd5     h5
+32.     b4      cxb4
+33.     c5      b3
+34.     Bxb3    f5
+35.     c6      f4
+36.     c7      fxg3
+37.     c8=Q    gxh2+
+38.     Kxh2    h4
+39.     Qe6     Kh6
+40.     Rg8     Kg5
+41.     Rxg6+   Kh5
+42.     Qg4#
+1-0
+
+[Event "Fujitsu Siemens Giants"]
+[Site "Frankfurt"]
+[Date "2000.06.23"]
+[Round "5"]
+[White "Kasparov, Garry"]
+[Black "Morozevich, Alexander"]
+[Result "1/2-1/2"]
+[WhiteElo "2851"]
+[BlackElo "2748"]
+[ECO "A40"]
+[EventDate "2000.06.22"]
+1.      d4      e6
+2.      c4      b6
+3.      a3      Bb7
+4.      Nc3     f5
+5.      d5      Nf6
+6.      g3      Na6
+7.      Bg2     Nc5
+8.      Nh3     Bd6
+9.      O-O     Be5
+10.     Qc2     O-O
+11.     Rd1     Qe7
+12.     Be3     Rab8
+13.     Rac1    Nce4
+14.     Nxe4    Nxe4
+15.     Nf4     c5
+16.     dxc6    Bxc6
+17.     Nd3     Bf6
+18.     f3      Nc5
+19.     b4      Nxd3
+20.     Rxd3    d5
+21.     f4      dxc4
+22.     Qxc4    Bxg2
+23.     Kxg2    Rf7
+24.     b5      Re8
+25.     Rcd1    e5
+26.     Rd7     Qe6
+27.     Qxe6    Rxe6
+28.     Kf3     exf4
+29.     gxf4    Rxd7
+30.     Rxd7    Re7
+31.     Rxe7    Bxe7
+32.     a4      Kf7
+33.     Bd4     Bd6
+34.     e4      g6
+35.     h3      Ke6
+36.     Bc3     Bc7
+37.     Bb4     Bd8
+38.     e5
+1/2-1/2
+
+[Event "Fujitsu Siemens Giants"]
+[Site "Frankfurt"]
+[Date "2000.06.24"]
+[Round "7"]
+[White "Kasparov, Garry"]
+[Black "Leko, Peter"]
+[Result "0-1"]
+[WhiteElo "2851"]
+[BlackElo "2725"]
+[ECO "D97"]
+[EventDate "2000.06.22"]
+1.      d4      Nf6
+2.      Nf3     g6
+3.      c4      Bg7
+4.      Nc3     d5
+5.      Qb3     dxc4
+6.      Qxc4    O-O
+7.      e4      a6
+8.      Qb3     c5
+9.      dxc5    Qa5
+10.     Qb6     Qxb6
+11.     cxb6    Nbd7
+12.     Be2     Nxb6
+13.     Be3     Nbd7
+14.     Nd4     Nc5
+15.     f3      e5
+16.     Nc6     bxc6
+17.     Bxc5    Rd8
+18.     Kf2     Be6
+19.     Rhd1    Nd7
+20.     Be3     Bf8
+21.     Rd2     f5
+22.     Rad1    Be7
+23.     g3      Kf7
+24.     b3      a5
+25.     Rc2     Nf6
+26.     Rxd8    Rxd8
+27.     exf5    gxf5
+28.     Na4     Bd5
+29.     Bb6     Ra8
+30.     Bc5     Nd7
+31.     Bxe7    Kxe7
+32.     Ke3     Kd6
+33.     Bd3     f4+
+34.     gxf4    exf4+
+35.     Kxf4    Rf8+
+36.     Kg5     Ne5
+37.     Bxh7    Nxf3+
+38.     Kh6     Rf4
+39.     Re2     Rh4+
+40.     Kg7     Nxh2
+41.     Nc3     Nf3
+42.     Ne4+    Kc7
+43.     Nf6     Nd4
+44.     Nxd5+   cxd5
+45.     Rd2     Kd6
+46.     Bd3     Ne6+
+47.     Kf6     Rf4+
+0-1
+
+[Event "Fujitsu Siemens Giants - duplicate"]
+[Site "Frankfurt"]
+[Date "2021.06.24"]
+[Round "7"]
+[White "another"]
+[Black "other"]
+[Result "0-1"]
+[WhiteElo "2851"]
+[BlackElo "2725"]
+[ECO "D97"]
+[EventDate "2000.06.22"]
+1.      d4      Nf6
+2.      Nf3     g6
+3.      c4      Bg7
+4.      Nc3     d5
+5.      Qb3     dxc4
+6.      Qxc4    O-O
+7.      e4      a6
+8.      Qb3     c5
+9.      dxc5    Qa5
+10.     Qb6     Qxb6
+11.     cxb6    Nbd7
+12.     Be2     Nxb6
+13.     Be3     Nbd7
+14.     Nd4     Nc5
+15.     f3      e5
+16.     Nc6     bxc6
+17.     Bxc5    Rd8
+18.     Kf2     Be6
+19.     Rhd1    Nd7
+20.     Be3     Bf8
+21.     Rd2     f5
+22.     Rad1    Be7
+23.     g3      Kf7
+24.     b3      a5
+25.     Rc2     Nf6
+26.     Rxd8    Rxd8
+27.     exf5    gxf5
+28.     Na4     Bd5
+29.     Bb6     Ra8
+30.     Bc5     Nd7
+31.     Bxe7    Kxe7
+32.     Ke3     Kd6
+33.     Bd3     f4+
+34.     gxf4    exf4+
+35.     Kxf4    Rf8+
+36.     Kg5     Ne5
+37.     Bxh7    Nxf3+
+38.     Kh6     Rf4
+39.     Re2     Rh4+
+40.     Kg7     Nxh2
+41.     Nc3     Nf3
+42.     Ne4+    Kc7
+43.     Nf6     Nd4
+44.     Nxd5+   cxd5
+45.     Rd2     Kd6
+46.     Bd3     Ne6+
+47.     Kf6     Rf4+
+0-1
+
+[Event "WSCC Sting sim - empty game"]
+[Site "New York"]
+[Date "2000.06.29"]
+[Round "?"]
+[White "Kasparov, Garry"]
+[Black "Irwin, Russ"]
+[Result "1-0"]
+[WhiteElo "2851"]
+[ECO "A00"]
+[EventDate "2000.06.29"]
+1-0
+
+[Event "London Charity Odds m - non-standard chess"]
+[Site "London"]
+[Date "2001.04.22"]
+[Round "4"]
+[White "Kasparov, Garry"]
+[Black "Chapman, Terence"]
+[Result "1-0"]
+[WhiteElo "2827"]
+[EventDate "2001.04.21"]
+[SetUp "1"]
+[FEN "rnbqkbnr/pppppppp/8/8/8/8/1PPP1PPP/RNBQKBNR w KQkq - 0 1"]
+1.      f4      Nf6
+2.      Nf3     e6
+3.      g3      b6
+4.      Bg2     Bb7
+5.      O-O     Be7
+6.      d3      O-O
+7.      Nbd2    d6
+8.      h3      c5
+9.      g4      Qd7
+10.     Qe2     Nc6
+11.     c3      Rae8
+12.     Nc4     Qc7
+13.     Nfd2    b5
+14.     Ne3     Bd8
+15.     g5      Nd5
+16.     Ne4     Nxe3
+17.     Bxe3    a5
+18.     Rf2     Kh8
+19.     Qh5     Nb8
+20.     Nxd6    Qxd6
+21.     Bxb7    Nc6
+22.     g6      fxg6
+23.     Qxc5    Qxd3
+24.     Bxc6
+1-0
+
+[Event "Fujitsu Siemens Giants - no clear end"]
+[Site "Frankfurt"]
+[Date "2000.06.24"]
+[Round "7"]
+[White "gary"]
+[Black "pete"]
+[Result "*"]
+[WhiteElo "2851"]
+[BlackElo "2725"]
+[ECO "D97"]
+[EventDate "2000.06.22"]
+1.      d4      Nf6
+2.      Nf3     g6
+3.      c4      Bg7
+4.      Nc3     d5
+5.      Qb3     dxc4
+6.      Qxc4    O-O
+7.      e4      a6
+*
+
+[Event "Fujitsu Siemens Giants - invalid moves"]
+[Site "Frankfurt"]
+[Date "2000.06.23"]
+[Round "5"]
+[White "arry"]
+[Black "moro"]
+[Result "1/2-1/2"]
+[WhiteElo "2851"]
+[BlackElo "2748"]
+[ECO "A40"]
+[EventDate "2000.06.22"]
+1.      d4      e6
+2.      c4      b6
+3.      a3      Bb7
+4.      Nc3     f5
+5.      O-O     O-O-O
+6.      Nc3
+1/2-1/2
+
+[Event "Bayern-chI Bank Hofmann 1st - wrong result"]
+[Site "Bad Wiessee"]
+[Date "1997.11.15"]
+[Round "1"]
+[White "Khalifman, Alexander"]
+[Black "Kaftan, Thorsten"]
+[Result "1/2-1/2"]
+[WhiteElo "2655"]
+[ECO "D07"]
+[EventDate "1997.11.15"]
+1.      d4      d5
+2.      c4      Nc6
+3.      Nf3     Bg4
+4.      Nc3     Nf6
+5.      cxd5    Bxf3
+6.      gxf3    Nxd5
+7.      e4      Nb6
+8.      d5      Ne5
+9.      f4      Ned7
+10.     a4      c6
+11.     a5      Nc8
+12.     a6      Qc7
+13.     axb7    Qxb7
+14.     Ba6     Qc7
+15.     Qa4     cxd5
+16.     Nxd5    Qd6
+17.     Bb7     Rb8
+18.     e5      Nb6
+19.     Qxa7    Rxb7
+20.     Qxb7    Qxd5
+21.     Ra8+    Nxa8
+22.     Qc8#
+1/2-1/2
+
+[Event "basic"]
+[Date "2010.06.23"]
+[White "Aaa"]
+[Black "Bbb Ccc"]
+[Result "1/2-1/2"]
+1.      d4      e6
+2.      c4      b6
+1/2-1/2
+
+[Event "basic-dup"]
+[Date "2010.06.23"]
+[White "Aaa"]
+[Black "CCC, Bbb"]
+[Result "1/2-1/2"]
+1.      d4      e6
+2.      c4      b6
+1/2-1/2
+
+[Event "basic-nondup"]
+[Date "2010.06.24"]
+[White "Ddd"]
+[Black "Bbb Ccc"]
+[Result "1/2-1/2"]
+1.      d4      e6
+2.      c4      b6
+1/2-1/2
+
+[Event "basic"]
+[Date "2010.06.25"]
+[White "Aaa"]
+[Black "Bbb Ccc"]
+[Result "1/2-1/2"]
+1.      d4      e6
+2.      c4      b6
+1/2-1/2
