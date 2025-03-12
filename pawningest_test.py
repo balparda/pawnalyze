@@ -24,7 +24,7 @@ class TestPawnIngest(unittest.TestCase):
 
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNData')
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNCache')
-  def test_Main_URL(self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock) -> None:
+  def test_MainURL(self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock) -> None:
     """Provide -u <URL>."""
     mock_db = mock.MagicMock()
     mock_PGNData.return_value = mock_db
@@ -49,7 +49,7 @@ class TestPawnIngest(unittest.TestCase):
 
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNData')
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNCache')
-  def test_Main_File(self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock) -> None:
+  def test_MainFile(self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock) -> None:
     """Provide -f /some/file.pgn. We confirm it calls db.LoadFromDisk('/some/file.pgn')."""
     mock_db = mock.MagicMock()
     mock_PGNData.return_value = mock_db
@@ -71,13 +71,13 @@ class TestPawnIngest(unittest.TestCase):
   @mock.patch('pawnalyze.pawningest.os.walk')
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNData')
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNCache')
-  def test_Main_Directory(
+  def test_MainDirectory(
       self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock,
       mock_walk: mock.MagicMock) -> None:
-    '''
-    Provide -d /some/dir => _LoadFromDirectory.
+    """Provide -d /some/dir => _LoadFromDirectory.
+
     That calls os.walk() plus db.LoadFromDisk(...) for each .pgn file.
-    '''
+    """
     mock_db = mock.MagicMock()
     mock_PGNData.return_value = mock_db
     mock_cache = mock.MagicMock()
@@ -111,7 +111,7 @@ class TestPawnIngest(unittest.TestCase):
 
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNData')
   @mock.patch('pawnalyze.pawningest.pawnlib.PGNCache')
-  def test_Main_Sources(self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock) -> None:
+  def test_MainSources(self, mock_PGNCache: mock.MagicMock, mock_PGNData: mock.MagicMock) -> None:
     """Provide -s figshare.
 
     => _LoadFromSource => calls _LoadFromURL internally,

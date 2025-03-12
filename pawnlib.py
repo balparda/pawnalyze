@@ -942,15 +942,6 @@ class PGNData:
     self.DropAllTables()
     self.DeleteDBFile()
 
-  def IsHashInDB(self, game_hash: str) -> bool:
-    """Checks if a `game_hash` was in the DB at the beginning of a run."""
-    # lazy load of cache
-    if self._known_hashes is None:
-      self._known_hashes = self.GetAllKnownHashes()
-      logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
-    # lookup
-    return game_hash in self._known_hashes
-
   # POSITIONS TABLE ################################################################################
 
   def _InsertPosition(
@@ -1223,6 +1214,15 @@ class PGNData:
     return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
 
   ##################################################################################################
+
+  def IsHashInDB(self, game_hash: str) -> bool:
+    """Checks if a `game_hash` was in the DB at the beginning of a run."""
+    # lazy load of cache
+    if self._known_hashes is None:
+      self._known_hashes = self.GetAllKnownHashes()
+      logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
+    # lookup
+    return game_hash in self._known_hashes
 
   def GetPositionsWithMultipleBranches(
       self, filter_engine_done: bool = False) -> dict[int, dict[str, dict[int, str]]]:
