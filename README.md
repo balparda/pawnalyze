@@ -162,12 +162,17 @@ As our analysis grows, we must ensure the system can scale and handle the data v
 brew install db-browser-for-sqlite
 
 cd pawnalyze
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .pwn-venv
+source .pwn-venv/bin/activate
 
+pip install --upgrade pip
 pip install -r requirements.txt
 (or)
 pip install .
+
+./run_all_tests.py
+
+deactivate
 ```
 
 For a completely isolated environment (including the Python interpreter, OS libs, etc.), you can

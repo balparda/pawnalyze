@@ -1,15 +1,33 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=58.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pawnalyze"
-version = "1.0"
+version = "1.0.0"
 description = "Parse and analyze historical chess games: frequencies, trends, player styles, etc"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Daniel Balparda", email = "balparda@gmail.com" }
+]
 requires-python = ">=3.9"
+dependencies = [
+  "chess>=1.11.2",
+  "py7zr>=0.22.0",
+  "tqdm>=4.66.1",
+  "baselib @ git+https://github.com/balparda/baselib.git@v1.1.1",
+]
 
-[project.dependencies]
-chess = ">=1.11.2"
-py7zr = ">=0.22.0"
-tqdm = ">=4.66.1"
-baselib = {git = "https://github.com/balparda/baselib.git", rev = "v1.0"}
+[project.urls]
+# "Homepage" = "https://example.com/pawnalyze"
+"Source"   = "https://github.com/balparda/pawnalyze"
+# "Tracker"  = "https://github.com/balparda/pawnalyze/issues"
+
+[tool.setuptools.packages.find]
+include = ["pawnalyze"]
+exclude = [
+  "htmlcov",
+  "__pycache__",
+  "*.pyc"
+]

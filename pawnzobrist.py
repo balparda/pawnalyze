@@ -24,9 +24,6 @@ class Zobrist:
     See: https://en.wikipedia.org/wiki/Zobrist_hashing
   """
 
-  MakeHasher: Callable[[], Callable[[chess.Board], int]] = lambda: (
-      chess.polyglot.ZobristHasher(_PAWNALYZE_ZOBRIST_RANDOM_ARRAY))
-
   def __init__(self, h: int) -> None:
     """Constructor."""
     if not isinstance(h, int):  # type:ignore
@@ -56,11 +53,17 @@ class Zobrist:
     return False
 
 
+def MakeHasher() -> Callable[[chess.Board], Zobrist]:
+  """Returns a method that hashes boards into ints."""
+  hasher = chess.polyglot.ZobristHasher(_PAWNALYZE_ZOBRIST_RANDOM_ARRAY)
+  return lambda b: Zobrist(hasher(b))
+
+
 ZobristFromHash: Callable[[str], Zobrist] = lambda h: Zobrist(int(h, 16))
 
-ZobristFromBoard: Callable[[chess.Board], Zobrist] = lambda b: Zobrist(Zobrist.MakeHasher()(b))
+ZobristFromBoard: Callable[[chess.Board], Zobrist] = lambda b: MakeHasher()(b)  # pylint: disable=unnecessary-lambda
 
-ZobristFromFEN: Callable[[str], Zobrist] = lambda f: ZobristFromBoard(chess.Board(f))
+ZobristFromFEN: Callable[[str], Zobrist] = lambda f: MakeHasher()(chess.Board(f))
 
 
 ####################################################################################################

@@ -1,4 +1,4 @@
 chess>=1.11.2
 py7zr>=0.22.0
 tqdm>=4.66.1
-git+https://github.com/balparda/baselib.git@v1.0
+baselib @ git+https://github.com/balparda/baselib.git@v1.1.1

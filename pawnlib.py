@@ -313,8 +313,8 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
     InvalidGameError: if game object indicates errors or if illegal move/position is detected
   """
   board: chess.Board = game.board()
-  hasher: Callable[[chess.Board], int] = pawnzobrist.Zobrist.MakeHasher()
-  zobrist_previous: int = hasher(board)
+  hasher: Callable[[chess.Board], pawnzobrist.Zobrist] = pawnzobrist.MakeHasher()
+  zobrist_previous: pawnzobrist.Zobrist = hasher(board)
   flags: PositionFlag = PositionFlag(PositionFlag.WHITE_TO_MOVE)
   extras: ExtraInsightPositionFlag = ExtraInsightPositionFlag(0)
   # does this game contain errors?
@@ -339,11 +339,10 @@ def IterateGame(game: chess.pgn.Game) -> Generator[
           f'Invalid position ({board_status!r}) at {san} with {board.fen()!r}',
           ErrorGameCategory.INVALID_POSITION)
     # yield useful move/position info
-    zobrist_current: int = hasher(board)
+    zobrist_current: pawnzobrist.Zobrist = hasher(board)
     flags, extras = _CreatePositionFlags(board, san, flags, extras)
     yield (n_ply + 1, san, EncodePly(move),
-           (pawnzobrist.Zobrist(zobrist_previous), pawnzobrist.Zobrist(zobrist_current)),
-           board, flags, extras)
+           (zobrist_previous, zobrist_current), board, flags, extras)
     zobrist_previous = zobrist_current
 
 
