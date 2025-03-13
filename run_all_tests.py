@@ -9,6 +9,7 @@ import logging
 import types
 
 from baselib import base
+from pawnalyze import ecoingest_test
 from pawnalyze import pawnlib_test
 from pawnalyze import pawnenginemoves_test
 from pawnalyze import pawningest_test
@@ -25,6 +26,7 @@ _TEST_MODULES_TO_RUN: list[types.ModuleType] = [
     pawningest_test,
     pawnmaintain_test,
     pawnenginemoves_test,
+    ecoingest_test,
 ]
 
 

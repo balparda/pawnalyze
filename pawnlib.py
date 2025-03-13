@@ -61,7 +61,6 @@ ELO_CATEGORY_TO_PLY: dict[str, int] = {  # ply depth search for STOCKFISH VERSIO
 # useful
 GAME_ERRORS: Callable[[chess.pgn.Game], str] = lambda g: ' ; '.join(e.args[0] for e in g.errors)
 STANDARD_CHESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
-STARTING_POSITION_HASH: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(chess.pgn.Game().board())
 _PRINT_EVERY_N = 10000
 _EMPTY_HEADER_VALUES: set[str] = {
     '?', '??', '???', '????',
@@ -891,7 +890,7 @@ class PGNData:
       logging.info('Adding standard chess base position...')
       with self._conn:
         self._InsertPosition(
-            STARTING_POSITION_HASH,
+            pawnzobrist.STARTING_POSITION_HASH,
             PositionFlag(PositionFlag.WHITE_TO_MOVE), ExtraInsightPositionFlag(0))
 
   @property
@@ -1059,7 +1058,7 @@ class PGNData:
           INSERT INTO games(game_hash, end_position_hash, game_plys, game_headers,
                             error_category, error_pgn, error_message)
           VALUES(?, ?, ?, ?, ?, ?, ?)
-      """, (game_hash, str(STARTING_POSITION_HASH), '-', json.dumps(game_headers),
+      """, (game_hash, str(pawnzobrist.STARTING_POSITION_HASH), '-', json.dumps(game_headers),
             error_category.value, error_pgn, error_message))
 
   def GetGame(self, game_hash: str) -> Optional[
@@ -1269,7 +1268,7 @@ class PGNData:
       self, position_zob: pawnzobrist.Zobrist) -> tuple[str, chess.Board, list[int]]:
     """Reconstruct a FEN string for the given `position_hash`. Returns None if no path to root."""
     # if this is already the starting position, return the standard FEN directly
-    start_hash = str(STARTING_POSITION_HASH)
+    start_hash = str(pawnzobrist.STARTING_POSITION_HASH)
     board = chess.Board(STANDARD_CHESS_FEN)
     position_hash = str(position_zob)
     if position_hash == start_hash:
@@ -1316,7 +1315,7 @@ class PGNData:
     encoded_plys: list[int] = []
     new_count: int = 0
     board: Optional[chess.Board] = None
-    z_current: pawnzobrist.Zobrist = STARTING_POSITION_HASH
+    z_current: pawnzobrist.Zobrist = pawnzobrist.STARTING_POSITION_HASH
     game_headers: dict[str, str] = _GameMinimalHeaders(game)
     try:
       with self._conn:  # make all game operations inside one transaction
@@ -1387,7 +1386,7 @@ class PGNData:
         WHERE game_hashes IS NOT NULL
           AND game_hashes LIKE '%,%'
     """)
-    starting_position: str = str(STARTING_POSITION_HASH)
+    starting_position: str = str(pawnzobrist.STARTING_POSITION_HASH)
     rows: list[tuple[str, str]] = cursor.fetchall()
     # we'll need to skip game_hashes already in duplicate_games:
     known_duplicates: set[str] = self.GetAllDuplicateHashes()
@@ -1564,7 +1563,7 @@ class PGNData:
     # we'll consider the move graph from positions -> moves -> positions
     yield 'Visiting all positions...'
     visited_positions: set[str] = set()
-    to_visit: set[str] = {str(STARTING_POSITION_HASH)}
+    to_visit: set[str] = {str(pawnzobrist.STARTING_POSITION_HASH)}
     leaf_with_no_games: set[str] = set()
     progress_bar: tqdm.tqdm = tqdm.tqdm(
         total=n_all_positions, mininterval=1.0, miniters=100,

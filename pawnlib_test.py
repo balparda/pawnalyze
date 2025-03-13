@@ -91,7 +91,7 @@ class TestPawnLib(unittest.TestCase):
     """Test."""
     self.maxDiff = None  # no limit to diff output
     self.assertEqual(
-        self.db.GetPosition(pawnlib.STARTING_POSITION_HASH),
+        self.db.GetPosition(pawnzobrist.STARTING_POSITION_HASH),
         (pawnlib.PositionFlag(1), {pawnlib.ExtraInsightPositionFlag(0)},
          {'best': 1228, 'depth': 4, 'mate': 0, 'score': 33}, set()))
     self.assertIsNone(self.db.GetPosition(pawnzobrist.Zobrist(123)))
@@ -106,7 +106,7 @@ class TestPawnLib(unittest.TestCase):
         self.db.MergedHeaders('418073579eabddec4b5a9c740b59f00b24842b6cbf2921f569ce7100b37d01b1'),
         _MERGED_HEADER)
     self.assertListEqual(
-        [(i, str(j)) for i, j in self.db.GetMoves(pawnlib.STARTING_POSITION_HASH)],
+        [(i, str(j)) for i, j in self.db.GetMoves(pawnzobrist.STARTING_POSITION_HASH)],
         [(917, '7504991f9af1fa6d6c0862176b8fbd51'),
          (1127, '4e76061f723e19eab31025ada516d321')])
 

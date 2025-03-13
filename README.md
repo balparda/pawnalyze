@@ -260,6 +260,35 @@ then runs Stockfish or another UCI engine to compute moves and store the results
 ./pawnenginemoves.py
 ```
 
+## Ingesting ECO DB (ecoingest.py)
+
+Pawnalyze Encyclopedia of Chess Openings (ECO) ingestion.
+Will create the file ECO.json in the project. See:
+
+https://en.wikipedia.org/wiki/Encyclopaedia_of_Chess_Openings
+
+https://github.com/lichess-org/chess-openings
+
+Specifically data is loaded from 5 URLs:
+
+https://raw.githubusercontent.com/lichess-org/chess-openings/refs/heads/master/a.tsv
+...
+https://raw.githubusercontent.com/lichess-org/chess-openings/refs/heads/master/e.tsv
+
+File `ECO.json` will be saved. It is a JSON with format:
+
+```
+[(position_hash, eco_code, name, pgn, [(san, encoded_ply, ply_hash, flags, extras), (), ...]), ...]
+````
+
+where position hashes are guaranteed to be unique.
+
+### Usage
+
+```bash
+./ecoingest.py
+```
+
 ## Considerations on Chess Game Convergence at Different Ply Depths
 
 ### Ply Depth Beyond Which Games Cannot Remain Independent (Convergence is Inevitable)

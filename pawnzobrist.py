@@ -61,36 +61,13 @@ def MakeHasher() -> Callable[[chess.Board], Zobrist]:
 
 ZobristFromHash: Callable[[str], Zobrist] = lambda h: Zobrist(int(h, 16))
 
-ZobristFromBoard: Callable[[chess.Board], Zobrist] = lambda b: MakeHasher()(b)  # pylint: disable=unnecessary-lambda
-
-ZobristFromFEN: Callable[[str], Zobrist] = lambda f: MakeHasher()(chess.Board(f))
-
 
 ####################################################################################################
 
 
-def ZobristGenerateTable() -> tuple[str, str]:
-  """Print the (fixed) random array to use in the code below. Returns the last hex pair."""
-  # generate the 32-bytes long SHA-256
-  internal_hash: bytes = base.BytesBinHash(_SEED)
-  print()
-  print('_PAWNALYZE_ZOBRIST_RANDOM_ARRAY: list[int] = [  # 781+ random integers')
-  a: str = ''
-  b: str = ''
-  for _ in range(782 // 2):  # 782 to be even
-    a = internal_hash.hex()[32:]
-    internal_hash = base.BytesBinHash(internal_hash)
-    b = internal_hash.hex()[32:]
-    internal_hash = base.BytesBinHash(internal_hash)
-    print(f'    0x{a}, 0x{b},')
-  print(']')
-  print()
-  return (a, b)
-
-
 # we redefine a 128bit Zobrist by having 781+ 128bit random numbers
 # DO NOT EDIT: editing any value here will BREAK any existing pawnalyze DBs
-# DO NOT MANUALLY EDIT: use ZobristGenerateTable() above to generate, if needed
+# DO NOT MANUALLY EDIT: use ZobristGenerateTable() below to generate, if needed
 _PAWNALYZE_ZOBRIST_RANDOM_ARRAY: list[int] = [  # 781+ random integers
     0x5b974020de88f98c60a5a1528db4abdb, 0xc8540b981f081962d1dda154ce61cd6e,
     0x936d55ed1da5bcd83b88b9368d36d74d, 0x1bbef2fa66f0daeb7fff75e89e398cab,
@@ -484,6 +461,35 @@ _PAWNALYZE_ZOBRIST_RANDOM_ARRAY: list[int] = [  # 781+ random integers
     0xac4dff891534403dc4059a02ad3e50a9, 0x853f627c811767b908fc46a72c70755a,
     0xfda2af8637b3b483e5467b71c28acf5b, 0xb031bba5698b25a5424b5e4d029093ba,
 ]
+
+
+ZobristFromBoard: Callable[[chess.Board], Zobrist] = lambda b: MakeHasher()(b)  # pylint: disable=unnecessary-lambda
+
+ZobristFromFEN: Callable[[str], Zobrist] = lambda f: MakeHasher()(chess.Board(f))
+
+STARTING_POSITION_HASH: Zobrist = ZobristFromBoard(chess.pgn.Game().board())
+
+
+####################################################################################################
+
+
+def ZobristGenerateTable() -> tuple[str, str]:
+  """Print the (fixed) random array to use in the code below. Returns the last hex pair."""
+  # generate the 32-bytes long SHA-256
+  internal_hash: bytes = base.BytesBinHash(_SEED)
+  print()
+  print('_PAWNALYZE_ZOBRIST_RANDOM_ARRAY: list[int] = [  # 781+ random integers')
+  a: str = ''
+  b: str = ''
+  for _ in range(782 // 2):  # 782 to be even
+    a = internal_hash.hex()[32:]
+    internal_hash = base.BytesBinHash(internal_hash)
+    b = internal_hash.hex()[32:]
+    internal_hash = base.BytesBinHash(internal_hash)
+    print(f'    0x{a}, 0x{b},')
+  print(']')
+  print()
+  return (a, b)
 
 
 _SEED: bytes = b'>>> pawnalyze zobrist seed, by <balparda@gmail.com>, 2025 <<<'

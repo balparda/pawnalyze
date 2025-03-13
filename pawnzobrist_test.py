@@ -10,9 +10,6 @@ import logging
 # import pdb
 import unittest
 
-import chess
-import chess.pgn
-
 from baselib import base
 from pawnalyze import pawnzobrist
 
@@ -33,7 +30,7 @@ class TestPawnZobrist(unittest.TestCase):
     """Test."""
     # here, too, we are pinning this version o Zobrist to the random table generated in the module
     base_str: str = '3a653200920c4adb562ceff24c6af691'  # starting board position
-    base_hash: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(chess.pgn.Game().board())
+    base_hash: pawnzobrist.Zobrist = pawnzobrist.STARTING_POSITION_HASH
     self.assertEqual(str(base_hash), base_str)
     self.assertEqual(repr(base_hash), 'Zobrist("3a653200920c4adb562ceff24c6af691")')
     another_base: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(base_str)
