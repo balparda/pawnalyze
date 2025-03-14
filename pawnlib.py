@@ -46,6 +46,9 @@ _PGN_CACHE_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-cache')
 _PGN_DATA_DIR: str = base.MODULE_PRIVATE_DIR(__file__, '.pawnalyze-data')
 _PGN_SQL_FILE: str = os.path.join(_PGN_DATA_DIR, 'pawnalyze-games.db')
 
+# ECO file
+ECO_JSON_PATH: str = base.MODULE_PRIVATE_DIR(__file__, 'ECO.json')
+
 # tactical constants
 DEFAULT_ENGINE = 'stockfish'
 ELO_CATEGORY_TO_PLY: dict[str, int] = {  # ply depth search for STOCKFISH VERSION 17+
@@ -177,6 +180,24 @@ _RESULTS_PGN: dict[str, Callable[[PositionFlag], bool]] = {
     _BLACK_WIN_PGN: BLACK_WIN,
     _DRAW_PGN: DRAWN_GAME,
 }
+
+
+@dataclasses.dataclass
+class ECOMove:
+  """An ECO (opening) single move."""
+  san: str  # SAN notation for move
+  ply: int  # encoded ply move
+  position: pawnzobrist.Zobrist     # position hash
+  flags: PositionFlag               # position flags
+
+
+@dataclasses.dataclass
+class ECOEntry:
+  """An ECO (opening) entry."""
+  code: str             # ECO code (example: 'C21')
+  name: str             # ECO name for opening (example: 'Center Game: Kieseritzky Variation')
+  pgn: str              # PGN moves for opening line
+  moves: list[ECOMove]  # list of moves in opening line
 
 
 class PositionEval(TypedDict):
@@ -1596,3 +1617,38 @@ class PGNData:
       yield (f'==> Found {len(leaf_with_no_games)} leaf positions with no games: '
              f'{leaf_with_no_games!r}')
     yield ''
+
+
+class ECO:
+  """ECO (Encyclopedia of Chess Openings) in-memory database."""
+
+  def __init__(self, load_from: str = ECO_JSON_PATH) -> None:
+    self._eco_path: str = load_from.strip()
+    if not self._eco_path or not os.path.exists(self._eco_path):
+      raise ValueError(f'Invalid ECO path: {self._eco_path!r}')
+    self._db: dict[str, ECOEntry] = {}  # lazy load!
+
+  def Get(self, position: pawnzobrist.Zobrist) -> Optional[ECOEntry]:
+    """ECO lookup. None if not found. If found will get an ECOEntry. Will load DB on first get."""
+    if not self._db:
+      self._LoadData()
+    return self._db.get(str(position), None)
+
+  def _LoadData(self) -> None:
+    """Loads ECO database into memory."""
+    with open(self._eco_path, 'rt', encoding='utf-8') as file_obj:
+      eco_raw: list[tuple[str, str, str, str, list[tuple[str, int, str, int]]]] = json.loads(
+          file_obj.read())
+    if not eco_raw:
+      raise RuntimeError('No ECO data found')
+    for position, eco, name, pgn, moves in eco_raw:
+      if position in self._db:
+        raise RuntimeError(f'Duplicated position in ECO data: {position}')
+      if not moves:
+        raise RuntimeError(f'Empty moves in ECO data: {position}')
+      eco_moves: list[ECOMove] = []
+      for san, ply, mv, flags in moves:
+        eco_moves.append(ECOMove(
+            san=san, ply=ply, position=pawnzobrist.ZobristFromHash(mv), flags=PositionFlag(flags)))
+      self._db[position] = ECOEntry(
+          code=eco.upper().strip(), name=name.strip(), pgn=pgn.strip(), moves=eco_moves)

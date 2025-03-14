@@ -114,6 +114,18 @@ class TestPawnLib(unittest.TestCase):
     """Test."""
     self.assertListEqual(list(self.db.PrintDatabaseCheck()), _DB_CHECK_OUTPUT)
 
+  def test_ECO(self) -> None:
+    """Test."""
+    self.maxDiff = None  # no limit to diff output
+    eco = pawnlib.ECO()
+    self.assertIsNone(eco.Get(pawnzobrist.ZobristFromHash('31c2be39c829ed1333a06ba59ba042c5')))
+    b3: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash('7504991f9af1fa6d6c0862176b8fbd51')
+    self.assertEqual(
+        eco.Get(b3),
+        pawnlib.ECOEntry('A01', 'Nimzo-Larsen Attack', '1. b3',
+                         [pawnlib.ECOMove('b3', 917, b3, pawnlib.PositionFlag(2))]))
+    self.assertGreater(len(eco._db), 3500)  # ECO DB is known to have >3500 entries # type:ignore
+
 
 _GAMES_LOADED: dict[str, int] = {
     # {hame_hash: n_plys} for every game in the test file

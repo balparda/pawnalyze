@@ -47,7 +47,6 @@ _ECO_TEMPLATE: Callable[[str], str] = (
     lambda n: f'http://raw.githubusercontent.com/lichess-org/chess-openings/refs/heads/master/{n}.tsv')
 
 _ECO_URLS: list[str] = [_ECO_TEMPLATE(n) for n in ('a', 'b', 'c', 'd', 'e')]
-_ECO_JSON_PATH: str = base.MODULE_PRIVATE_DIR(__file__, 'ECO.json')
 
 
 def _IngestTSV(url: str, eco_dict: dict[str, tuple[str, str]]) -> None:
@@ -68,23 +67,23 @@ def _IngestTSV(url: str, eco_dict: dict[str, tuple[str, str]]) -> None:
 
 
 def _ConvertData(eco_dict: dict[str, tuple[str, str]]) -> list[
-    tuple[str, str, str, str, list[tuple[str, int, str, int, int]]]]:
+    tuple[str, str, str, str, list[tuple[str, int, str, int]]]]:
   """Convert what was loaded to a more useful format.
 
   Returns:
-    [(position, eco, name, pgn, [(san, encoded_ply, position, flags, extras), (), ...]), ...]
+    [(position, eco, name, pgn, [(san, encoded_ply, position, flags), (), ...]), ...]
     where position hashes are guaranteed to be unique
   """
-  eco_position: list[tuple[str, str, str, str, list[tuple[str, int, str, int, int]]]] = []
+  eco_position: list[tuple[str, str, str, str, list[tuple[str, int, str, int]]]] = []
   known_positions: set[str] = set()
   for pgn, (eco, name) in eco_dict.items():
     game: chess.pgn.Game = chess.pgn.read_game(io.StringIO(pgn))  # type:ignore
     if not game:
       raise RuntimeError(f'No game found in game lines: {pgn!r}')
-    plys: list[tuple[str, int, str, int, int]] = []
+    plys: list[tuple[str, int, str, int]] = []
     z_current: pawnzobrist.Zobrist = pawnzobrist.STARTING_POSITION_HASH
-    for _, san, encoded_ply, (_, z_current), _, flags, extras in pawnlib.IterateGame(game):
-      plys.append((san, encoded_ply, str(z_current), flags.value, extras.value))
+    for _, san, encoded_ply, (_, z_current), _, flags, _ in pawnlib.IterateGame(game):
+      plys.append((san, encoded_ply, str(z_current), flags.value))
     position = str(z_current)
     if position in known_positions:
       raise RuntimeError(f'Repeat position: {position!r} / {(name, eco, pgn)!r}')
@@ -96,15 +95,15 @@ def _ConvertData(eco_dict: dict[str, tuple[str, str]]) -> list[
 
 
 def _JsonOverride(
-    eco_data: list[tuple[str, str, str, str, list[tuple[str, int, str, int, int]]]]) -> Generator[
+    eco_data: list[tuple[str, str, str, str, list[tuple[str, int, str, int]]]]) -> Generator[
         str, None, None]:
   """Save data structure in JSON-readable format, which is easy in this case."""
   yield '[\n'
   last_idx: int = len(eco_data) - 1
   for i, (position, eco, name, pgn, plys) in enumerate(eco_data):
     ply_str: list[str] = []
-    for san, encoded_ply, ply_hash, flags, extras in plys:
-      ply_str.append(f'["{san}",{encoded_ply},"{ply_hash}",{flags},{extras}]')
+    for san, encoded_ply, ply_hash, flags in plys:
+      ply_str.append(f'["{san}",{encoded_ply},"{ply_hash}",{flags}]')
     yield f'["{position}", "{eco}", "{name}", "{pgn}", [{", ".join(ply_str)}]]{"" if i == last_idx else ","}\n'
   yield ']\n'
 
@@ -130,10 +129,10 @@ def Main() -> None:
         print()
       print(f'ECO ingestion ended, {len(basic_eco)} records loaded; convert and save...')
       eco_data: list[
-          tuple[str, str, str, str, list[tuple[str, int, str, int, int]]]] = _ConvertData(basic_eco)
-      with open(_ECO_JSON_PATH, 'wt', encoding='utf-8') as json_obj:
+          tuple[str, str, str, str, list[tuple[str, int, str, int]]]] = _ConvertData(basic_eco)
+      with open(pawnlib.ECO_JSON_PATH, 'wt', encoding='utf-8') as json_obj:
         json_obj.writelines(_JsonOverride(eco_data))
-      print(f'Saved to {_ECO_JSON_PATH}')
+      print(f'Saved to {pawnlib.ECO_JSON_PATH}')
     print()
     print(f'Executed in {base.TERM_GREEN}{op_timer.readable}{base.TERM_END}')
     print()

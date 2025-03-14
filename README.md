@@ -278,7 +278,7 @@ https://raw.githubusercontent.com/lichess-org/chess-openings/refs/heads/master/e
 File `ECO.json` will be saved. It is a JSON with format:
 
 ```
-[(position_hash, eco_code, name, pgn, [(san, encoded_ply, ply_hash, flags, extras), (), ...]), ...]
+[(position_hash, eco_code, name, pgn, [(san, encoded_ply, ply_hash, flags), (), ...]), ...]
 ````
 
 where position hashes are guaranteed to be unique.

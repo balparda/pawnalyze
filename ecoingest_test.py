@@ -47,16 +47,16 @@ class TestECOIngest(unittest.TestCase):
 
 _ECO_FILE: str = """\
 [
-["09e41bd5282ebaaf9f7a3e7c866e5382", "A00", "Anderssen Opening", "1. a3", [["a3",816,"09e41bd5282ebaaf9f7a3e7c866e5382",2,0]]],
-["7504991f9af1fa6d6c0862176b8fbd51", "A01", "Nimzovich-Larsen Attack", "1. b3", [["b3",917,"7504991f9af1fa6d6c0862176b8fbd51",2,0]]],
-["ba6df00a165a684bc0044c671e50ed52", "B00", "Other Opening", "1. h3", [["h3",1523,"ba6df00a165a684bc0044c671e50ed52",2,0]]],
-["26fa396cc6f30847ac0eb2f3ba3997ce", "B01", "Test Variation", "1. e4", [["e4",1228,"26fa396cc6f30847ac0eb2f3ba3997ce",2,0]]],
-["41632add6b250700df39e622411109ec", "C00", "French Defense", "1. e4 e6", [["e4",1228,"26fa396cc6f30847ac0eb2f3ba3997ce",2,0], ["e6",5244,"41632add6b250700df39e622411109ec",1,0]]],
-["3a26f37bdf417fce5702b8abc378596f", "C01", "Another Variation", "1. e4 e6 2. d4 d5", [["e4",1228,"26fa396cc6f30847ac0eb2f3ba3997ce",2,0], ["e6",5244,"41632add6b250700df39e622411109ec",1,0], ["d4",1127,"35701ec28b1754313a052c7da86d2c5c",2,0], ["d5",5135,"3a26f37bdf417fce5702b8abc378596f",1,0]]],
-["4120eba626683215de17b17bce03a612", "D00", "Queen's Pawn", "1. d4 d5", [["d4",1127,"4e76061f723e19eab31025ada516d321",2,0], ["d5",5135,"4120eba626683215de17b17bce03a612",1,0]]],
-["5cf200a8e1d944c65aa85170ceec4bc4", "D01", "Torre Attack", "1. d4 Nf6 2. Nf3 e6", [["d4",1127,"4e76061f723e19eab31025ada516d321",2,0], ["Nf6",6245,"1a5492d26859a8750581110af23c31f7",1,0], ["Nf3",621,"3b6b13194c0f4b81299f05a135c4d5e6",2,0], ["e6",5244,"5cf200a8e1d944c65aa85170ceec4bc4",1,0]]],
-["2ede555898bc45024e0de17fa01c6a92", "E00", "Catalan Opening", "1. d4 Nf6 2. c4 e6 3. g3", [["d4",1127,"4e76061f723e19eab31025ada516d321",2,0], ["Nf6",6245,"1a5492d26859a8750581110af23c31f7",1,0], ["c4",1026,"2247c21ca94cf400a0ff36b1a64c9331",2,0], ["e6",5244,"45ded1ad049afb47d3c862605d640d13",1,0], ["g3",1422,"2ede555898bc45024e0de17fa01c6a92",2,0]]],
-["2188b8e1ccea6efd230a75a9cb091fa1", "E01", "Another Catalan", "1. d4 Nf6 2. c4 e6 3. g3 d5", [["d4",1127,"4e76061f723e19eab31025ada516d321",2,0], ["Nf6",6245,"1a5492d26859a8750581110af23c31f7",1,0], ["c4",1026,"2247c21ca94cf400a0ff36b1a64c9331",2,0], ["e6",5244,"45ded1ad049afb47d3c862605d640d13",1,0], ["g3",1422,"2ede555898bc45024e0de17fa01c6a92",2,0], ["d5",5135,"2188b8e1ccea6efd230a75a9cb091fa1",1,0]]]
+["09e41bd5282ebaaf9f7a3e7c866e5382", "A00", "Anderssen Opening", "1. a3", [["a3",816,"09e41bd5282ebaaf9f7a3e7c866e5382",2]]],
+["7504991f9af1fa6d6c0862176b8fbd51", "A01", "Nimzovich-Larsen Attack", "1. b3", [["b3",917,"7504991f9af1fa6d6c0862176b8fbd51",2]]],
+["ba6df00a165a684bc0044c671e50ed52", "B00", "Other Opening", "1. h3", [["h3",1523,"ba6df00a165a684bc0044c671e50ed52",2]]],
+["26fa396cc6f30847ac0eb2f3ba3997ce", "B01", "Test Variation", "1. e4", [["e4",1228,"26fa396cc6f30847ac0eb2f3ba3997ce",2]]],
+["41632add6b250700df39e622411109ec", "C00", "French Defense", "1. e4 e6", [["e4",1228,"26fa396cc6f30847ac0eb2f3ba3997ce",2], ["e6",5244,"41632add6b250700df39e622411109ec",1]]],
+["3a26f37bdf417fce5702b8abc378596f", "C01", "Another Variation", "1. e4 e6 2. d4 d5", [["e4",1228,"26fa396cc6f30847ac0eb2f3ba3997ce",2], ["e6",5244,"41632add6b250700df39e622411109ec",1], ["d4",1127,"35701ec28b1754313a052c7da86d2c5c",2], ["d5",5135,"3a26f37bdf417fce5702b8abc378596f",1]]],
+["4120eba626683215de17b17bce03a612", "D00", "Queen's Pawn", "1. d4 d5", [["d4",1127,"4e76061f723e19eab31025ada516d321",2], ["d5",5135,"4120eba626683215de17b17bce03a612",1]]],
+["5cf200a8e1d944c65aa85170ceec4bc4", "D01", "Torre Attack", "1. d4 Nf6 2. Nf3 e6", [["d4",1127,"4e76061f723e19eab31025ada516d321",2], ["Nf6",6245,"1a5492d26859a8750581110af23c31f7",1], ["Nf3",621,"3b6b13194c0f4b81299f05a135c4d5e6",2], ["e6",5244,"5cf200a8e1d944c65aa85170ceec4bc4",1]]],
+["2ede555898bc45024e0de17fa01c6a92", "E00", "Catalan Opening", "1. d4 Nf6 2. c4 e6 3. g3", [["d4",1127,"4e76061f723e19eab31025ada516d321",2], ["Nf6",6245,"1a5492d26859a8750581110af23c31f7",1], ["c4",1026,"2247c21ca94cf400a0ff36b1a64c9331",2], ["e6",5244,"45ded1ad049afb47d3c862605d640d13",1], ["g3",1422,"2ede555898bc45024e0de17fa01c6a92",2]]],
+["2188b8e1ccea6efd230a75a9cb091fa1", "E01", "Another Catalan", "1. d4 Nf6 2. c4 e6 3. g3 d5", [["d4",1127,"4e76061f723e19eab31025ada516d321",2], ["Nf6",6245,"1a5492d26859a8750581110af23c31f7",1], ["c4",1026,"2247c21ca94cf400a0ff36b1a64c9331",2], ["e6",5244,"45ded1ad049afb47d3c862605d640d13",1], ["g3",1422,"2ede555898bc45024e0de17fa01c6a92",2], ["d5",5135,"2188b8e1ccea6efd230a75a9cb091fa1",1]]]
 ]
 """
 
