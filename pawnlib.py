@@ -750,7 +750,7 @@ def RunEvalWorkers(
     logging.info('All engine eval workers done')
 
 
-def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
+def UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
   """Unzips `in_file` to `out_file`. Raises BadZipFile if error."""
   logging.info('Unzipping file as ZIP')
   with zipfile.ZipFile(in_file, 'r') as zip_ref:
@@ -760,7 +760,8 @@ def _UnzipZipFile(in_file: IO[bytes], out_file: IO[Any]) -> None:
       out_file.write(pgn_file.read())
 
 
-def _UnzipSevenZFile(in_file: str, out_file: IO[Any]) -> None:
+def UnzipSevenZFile(in_file: str, out_file: IO[Any]) -> None:
+  """Uncompress 7z file."""
   logging.info('Unzipping file as 7z')
   with py7zr.SevenZipFile(in_file, mode='r') as svz_ref:
     files: Optional[dict[str, IO[Any]]] = svz_ref.read()
@@ -1649,12 +1650,12 @@ class PGNData:
           raw_file.seek(0)
           # open the temporary file as a ZIP archive
           try:
-            _UnzipZipFile(raw_file, out_file)
+            UnzipZipFile(raw_file, out_file)
           except zipfile.BadZipFile as err:
             if 'not a zip' not in str(err):
               raise
             # try to unzip as 7z
-            _UnzipSevenZFile(raw_file.name, out_file)
+            UnzipSevenZFile(raw_file.name, out_file)
         # now we have a file name, so keep it
         pgn_path = out_file.name
         if cache:

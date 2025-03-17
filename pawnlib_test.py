@@ -6,6 +6,7 @@
 # pylint: disable=invalid-name,protected-access
 """pawnlib.py unittest."""
 
+import io
 import logging
 import os.path
 # import pdb
@@ -13,6 +14,7 @@ import shutil
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import chess
 
@@ -135,6 +137,77 @@ class TestPawnLib(unittest.TestCase):
         pawnlib.ECOEntry('A01', 'Nimzo-Larsen Attack', '1. b3',
                          [pawnlib.ECOMove('b3', 917, b3, pawnlib.PositionFlag(2))]))
     self.assertGreater(len(eco._db), 3500)  # ECO DB is known to have >3500 entries # type:ignore
+
+  @mock.patch('pawnlib.zipfile.ZipFile')
+  def test_UnzipBasic(self, mock_ZipFile: mock.MagicMock) -> None:
+    """Test a basic scenario for _UnzipZipFile with a single file in the zip archive."""
+    # Prepare our in-memory "ZIP" and out file
+    in_data = io.BytesIO(b'FakeZipData')   # not actually a valid ZIP, because we are mocking
+    out_data = io.BytesIO()
+    # Create mocks for the zip_ref object
+    mock_zip_ref = mock.MagicMock()
+    mock_zip_ref.namelist.return_value = ['test.pgn']
+    # We can also mock out open(...) returning a BytesIO with some PGN data
+    fake_pgn_contents = b'[Event "Test"]\n1. e4 e5 2. Nf3\n'
+    mock_zip_open = mock.MagicMock()
+    mock_zip_open.read.return_value = fake_pgn_contents
+    # The context manager for zip_ref.open(...) => mock_zip_open
+    mock_zip_ref.open.return_value.__enter__.return_value = mock_zip_open
+    # The patch for ZipFile(...) => returns mock_zip_ref
+    mock_ZipFile.return_value.__enter__.return_value = mock_zip_ref
+    # Now call the function under test
+    pawnlib.UnzipZipFile(in_data, out_data)
+    # Verify we used zip_ref correctly
+    mock_ZipFile.assert_called_once_with(in_data, 'r')
+    mock_zip_ref.namelist.assert_called_once()
+    mock_zip_ref.open.assert_called_once_with('test.pgn')
+    mock_zip_open.read.assert_called_once()
+    # Check that out_data was written the expected contents
+    out_data.seek(0)
+    self.assertEqual(out_data.read(), fake_pgn_contents)
+
+  @mock.patch('pawnlib.zipfile.ZipFile', side_effect=zipfile.BadZipFile)
+  def test_UnzipBadZip(self, mock_ZipFile: mock.MagicMock) -> None:
+    """Test that a BadZipFile error is raised from zipfile, confirm we bubble it up (or handle)."""
+    in_data = io.BytesIO(b'BadZipData')
+    out_data = io.BytesIO()
+    # We can either check an exception or rely on function's doc that it "Raises BadZipFile if error."
+    with self.assertRaises(zipfile.BadZipFile):
+      pawnlib.UnzipZipFile(in_data, out_data)
+    mock_ZipFile.assert_called_once_with(in_data, 'r')
+
+  @mock.patch('pawnlib.py7zr.SevenZipFile')
+  def test_SevenZBasic(self, mock_SevenZipFile: mock.MagicMock) -> None:
+    """Test a basic scenario for _UnzipSevenZFile with exactly one file inside the 7z archive."""
+    # We do not handle in-memory 7z because we are mocking py7zr.SevenZipFile itself.
+    out_data = io.BytesIO()
+    # Suppose we have a dictionary with a single key-value => single file
+    fake_7z_file_data = b'Some data from a 7z'
+    mock_7z_ref = mock.MagicMock()
+    mock_7z_ref.read.return_value = {'only.pgn': io.BytesIO(fake_7z_file_data)}
+    # The context manager for SevenZipFile(...) => mock_7z_ref
+    mock_SevenZipFile.return_value.__enter__.return_value = mock_7z_ref
+    # Now call the function
+    pawnlib.UnzipSevenZFile('dummy.7z', out_data)
+    mock_SevenZipFile.assert_called_once_with('dummy.7z', mode='r')
+    mock_7z_ref.read.assert_called_once()
+    out_data.seek(0)
+    self.assertEqual(out_data.read(), fake_7z_file_data)
+
+  @mock.patch('pawnlib.py7zr.SevenZipFile')
+  def test_SevenZMultipleFiles(self, mock_SevenZipFile: mock.MagicMock) -> None:
+    """Test that if the 7z read() returns more than one file, we raise NotImplementedError."""
+    out_data = io.BytesIO()
+    mock_7z_ref = mock.MagicMock()
+    mock_7z_ref.read.return_value = {
+        'file1.pgn': io.BytesIO(b'abc'),
+        'file2.pgn': io.BytesIO(b'def'),
+    }
+    mock_SevenZipFile.return_value.__enter__.return_value = mock_7z_ref
+    with self.assertRaises(NotImplementedError):
+      pawnlib.UnzipSevenZFile('dummy.7z', out_data)
+    mock_SevenZipFile.assert_called_once_with('dummy.7z', mode='r')
+    mock_7z_ref.read.assert_called_once()
 
 
 _GAMES_LOADED: dict[str, int] = {
