@@ -38,7 +38,7 @@ _WORKER_THREADS_DEFAULT: int = 12      # number of worker threads to spawn
 _WORKER_TIMEOUT_SECONDS: float = 10.0  # seconds until a worker is considered timed-out
 _MIN_DEPTH: int = 3
 _DEFAULT_DEPTH: int = pawnlib.ELO_CATEGORY_TO_PLY['super']
-_MAX_DEPTH: int = _DEFAULT_DEPTH + 4
+_MAX_DEPTH: int = max(pawnlib.ELO_CATEGORY_TO_PLY.values()) + 4
 _MAX_NUMBER_TASKS: int = 1000000
 
 

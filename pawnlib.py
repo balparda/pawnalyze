@@ -19,6 +19,7 @@ import os.path
 # import pdb
 import queue
 import sqlite3
+import sys
 import tempfile
 import time
 from typing import Any, BinaryIO, Callable, Generator, IO, Optional, TypedDict
@@ -214,7 +215,7 @@ class PositionEval(TypedDict):
       -N (negative) = opponent side is ahead by abs(N) / 100 pawns
   """
   depth: int  # depth of this evaluation
-  best: int   # best found move; encoded
+  best: int   # best found move; encoded; 0 == no eval is possible for position
   mate: int   # 0 no mate; !=0 position has mate-in-N (==abs(mate)); >0 side to move; <0 opponent
   score: int  # score, only if mate==0, in centi-pawns
   # AVOID adding stuff here; if you do, change EncodeEval() & DecodeEval() and MIGRATE THE DB!!
@@ -230,6 +231,18 @@ def DecodeEval(evaluation: str) -> PositionEval:
   depth, best, mate, score = evaluation.split(',')
   return PositionEval(
       depth=int(depth, 16), best=int(best, 16), mate=int(mate, 16), score=int(score, 16))
+
+
+def PrintEval(pos: Optional[PositionEval], board: Optional[chess.Board] = None) -> str:
+  """Pretty-print a PositionEval object."""
+  if pos is None:
+    return '*'
+  if not pos['best']:
+    return f'{pos["depth"]}/*/*'  # no eval possible for this position
+  best: chess.Move = DecodePly(pos['best'])
+  san: str = str(best) if board is None else board.san(best)
+  score: str = f'M{pos["mate"]}' if pos['mate'] else f'{pos["score"] / 100.0:0.2}'
+  return f'{pos["depth"]}/{san}/{score}'
 
 
 # convert a chess.Move into an integer we can use to index our dictionaries
@@ -547,7 +560,7 @@ def FindBestMove(
     depth: int = ELO_CATEGORY_TO_PLY['super'],
     engine_path: str = DEFAULT_ENGINE,
     engine_obj: Optional[chess.engine.SimpleEngine] = None) -> Optional[
-        tuple[chess.Move, PositionEval]]:
+        tuple[chess.Move, PositionEval, str]]:
   """Finds the best move for a position (FEN) up to a depth.
 
   Args:
@@ -590,8 +603,9 @@ def FindBestMove(
     # mate_in < 0 => the opponent is mating in abs(n_mate) moves
     mate_in = n_mate
   score: Optional[int] = relative_score.score()
-  return (best_move, PositionEval(
-      depth=depth, best=EncodePly(best_move), mate=mate_in, score=0 if score is None else score))
+  pos_eval = PositionEval(
+      depth=depth, best=EncodePly(best_move), mate=mate_in, score=0 if score is None else score)
+  return (best_move, pos_eval, PrintEval(pos_eval, board=board))
 
 
 def _WorkerProcessEvalTask(
@@ -604,10 +618,11 @@ def _WorkerProcessEvalTask(
   if depth < ELO_CATEGORY_TO_PLY['club']:
     raise ValueError(f'ply depth should be at least {ELO_CATEGORY_TO_PLY["club"]}')
   # local connection: each thread must have it own
+  work_count: int = 0
   fen: str
   task: set[str]
   p_hash: str = ''
-  p_eval: Optional[tuple[chess.Move, PositionEval]]
+  p_eval: Optional[tuple[chess.Move, PositionEval, str]]
   db = PGNData(db_path=db_file, readonly=db_readonly)
   try:
     # only once: open Stockfish/engine in UCI mode, also append to a log file
@@ -626,19 +641,23 @@ def _WorkerProcessEvalTask(
               break
             # we have a task: evaluate and save
             position: pawnzobrist.Zobrist = pawnzobrist.ZobristFromHash(p_hash)  # type:ignore
-            with base.Timer() as fen_timer:
-              fen = db.PositionHashToFEN(position)[0]
+            fen = db.Locate(position)[0].fen()
             with base.Timer() as engine_timer:
               p_eval = FindBestMove(fen, depth=depth, engine_obj=engine)
             if p_eval:
               db.UpdatePositionEvaluation(position, p_eval[1])
-              file_obj.write(
-                  f'{p_hash} ({fen} @{fen_timer.readable}) => '
-                  f'{p_eval[1]!r} @{engine_timer.readable}\n')
+              file_obj.write(f'{p_hash} ({fen}) → {p_eval[2]} @{engine_timer.readable}\n')
             else:
-              file_obj.write(
-                  f'{p_hash} ({fen} @{fen_timer.readable}) => None\n')
+              db.UpdatePositionEvaluation(position, PositionEval(depth=depth, best=0, mate=0, score=0))
+              file_obj.write(f'{p_hash} ({fen}) → None\n')
             tasks_done[worker_n] = tasks_done[worker_n] + 1  # this is only OK because each thread has its own
+            work_count += 1
+            # write a timestamp every 10 computations
+            if not work_count % 20:
+              file_obj.write(f'==>> #{worker_n} / {work_count} done @ {base.STR_TIME()} <<==\n')
+            # make sure to flush() every 5 computations
+            if not work_count % 5:
+              file_obj.flush()
         except queue.Empty:
           file_obj.write(
               f'Worker #{worker_n} timed out, no tasks available. Exiting. @ {base.STR_TIME()}\n\n')
@@ -817,9 +836,18 @@ class PGNCache:
 class PGNData:
   """A PGN Database for Pawnalyze using SQLite."""
 
+  _RECURSION_LIMIT: int = 10000  # default is usually 1000: sys.getrecursionlimit()
+
   _TABLE_ORDER: list[str] = [
-      'positions', 'games', 'duplicate_games', 'moves',
-      'idx_games_positions_hash', 'idx_duplicates_hash', 'idx_destination_hash']
+      'positions',
+      'games',
+      'duplicate_games',
+      'moves',
+      'idx_positions_main_hash',
+      'idx_games_main_hash', 'idx_games_positions_hash',
+      'idx_duplicates_main', 'idx_duplicates_hash',
+      'idx_source_hash', 'idx_destination_hash',
+  ]
 
   _TABLES: dict[str, str] = {
 
@@ -832,6 +860,8 @@ class PGNData:
               game_hashes TEXT         -- ','-separated hex set of game_hash that ended here, if any
           );
       """,
+
+      'idx_positions_main_hash': 'CREATE INDEX IF NOT EXISTS idx_positions_main_hash ON positions(position_hash);',
 
       'games': """
           CREATE TABLE IF NOT EXISTS games (
@@ -846,6 +876,8 @@ class PGNData:
           );
       """,
 
+      'idx_games_main_hash': 'CREATE INDEX IF NOT EXISTS idx_games_main_hash ON games(game_hash);',
+
       'idx_games_positions_hash': 'CREATE INDEX IF NOT EXISTS idx_games_positions_hash ON games(end_position_hash);',
 
       'duplicate_games': """
@@ -856,6 +888,8 @@ class PGNData:
               FOREIGN KEY(duplicate_of) REFERENCES games(game_hash) ON DELETE RESTRICT
           );
       """,
+
+      'idx_duplicates_main': 'CREATE INDEX IF NOT EXISTS idx_duplicates_main ON duplicate_games(game_hash);',
 
       'idx_duplicates_hash': 'CREATE INDEX IF NOT EXISTS idx_duplicates_hash ON duplicate_games(duplicate_of);',
 
@@ -869,6 +903,8 @@ class PGNData:
               FOREIGN KEY(to_position_hash) REFERENCES positions(position_hash) ON DELETE RESTRICT
           );
       """,
+
+      'idx_source_hash': 'CREATE INDEX IF NOT EXISTS idx_source_hash ON moves(from_position_hash);',
 
       'idx_destination_hash': 'CREATE INDEX IF NOT EXISTS idx_destination_hash ON moves(to_position_hash);',
 
@@ -898,8 +934,9 @@ class PGNData:
     # self._conn: sqlite3.Connection = sqlite3.connect(
     #     f'file:{self._db_path}{"?mode=ro" if self._readonly else ""}', uri=True)
     self._conn: sqlite3.Connection = sqlite3.connect(self.db_path)
-    self._conn.execute('PRAGMA foreign_keys = ON;')  # allow foreign keys to be used
-    self._known_hashes: Optional[set[str]] = None    # lazy hashes cache
+    self._conn.execute('PRAGMA foreign_keys = ON;')      # allow foreign keys to be used
+    self._game_hashes: Optional[set[str]] = None         # lazy hashes cache
+    self._duplicate_hashes: Optional[set[str]] = None    # lazy hashes cache
     if exists_db:
       logging.info(
           'Opening %sSQLite DB in %r', 'READONLY ' if self._readonly else '', self.db_path)
@@ -913,6 +950,13 @@ class PGNData:
         self._InsertPosition(
             pawnzobrist.STARTING_POSITION_HASH,
             PositionFlag(PositionFlag.WHITE_TO_MOVE), ExtraInsightPositionFlag(0))
+    # increase recursion limit so we can self.Walk() deep games
+    if (old_recursion := sys.getrecursionlimit()) < PGNData._RECURSION_LIMIT:
+      logging.info(
+          'Changing recursion limit from %d to %d', old_recursion, PGNData._RECURSION_LIMIT)
+      sys.setrecursionlimit(PGNData._RECURSION_LIMIT)
+    # create ECO
+    self._eco = ECO()
 
   @property
   def is_readonly(self) -> bool:
@@ -1222,26 +1266,126 @@ class PGNData:
           'INSERT OR IGNORE INTO moves(from_position_hash, ply, to_position_hash) VALUES(?, ?, ?)',
           (str(from_hash), ply, str(to_hash)))
 
-  def GetMoves(
-      self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, pawnzobrist.Zobrist]]:
+  def GetChildMoves(
+      self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, chess.Move, pawnzobrist.Zobrist]]:
     """Return a list of (ply, to_position_hash) for the given from_position_hash."""
     cursor: sqlite3.Cursor = self._conn.execute("""
         SELECT ply, to_position_hash
         FROM moves
         WHERE from_position_hash = ?;
     """, (str(position_hash),))
-    return [(ply, pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
+    return [(ply, DecodePly(ply), pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
+
+  def GetParentMoves(
+      self, position_hash: pawnzobrist.Zobrist) -> list[tuple[int, chess.Move, pawnzobrist.Zobrist]]:
+    """Return a list of (ply, from_position_hash) for the given to_position_hash."""
+    cursor: sqlite3.Cursor = self._conn.execute("""
+        SELECT ply, from_position_hash
+        FROM moves
+        WHERE to_position_hash = ?;
+    """, (str(position_hash),))
+    return [(ply, DecodePly(ply), pawnzobrist.Zobrist(int(z, 16))) for ply, z in cursor.fetchall()]  # non-stream
+
+  def Walk(
+      self,
+      position: Optional[pawnzobrist.Zobrist] = None,
+      plys: Optional[list[tuple[int, str]]] = None,
+      board: Optional[chess.Board] = None,
+      recurse: bool = True,
+      expand_games: bool = True) -> Generator[tuple[
+          pawnzobrist.Zobrist,                                # position
+          list[tuple[int, str]],                              # cumulative movement list to position; depth is len()
+          Optional[ECOEntry],                                 # ECO entry for position, if any
+          chess.Board,                                        # current position board
+          list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]],  # moves leaving position [(ply, move, position), ...]
+          PositionFlag,                                       # flags
+          set[ExtraInsightPositionFlag],                      # {extra1, extra2, ...}
+          Optional[PositionEval],                             # eval | None
+          dict[str, Optional[dict[str, str]]]], None, None]:  # {game: headers} for non-error non-duplicates
+    """Recurse through positions/moves, starting at `position`. Costly but complete.
+
+    Args:
+      position: (default None) Initial position
+      plys: (default None) Plys from root to this position
+      recurse: (default True) Follow ply paths and recurse into games tree
+      expand_games: (default True) If True will get game headers info for each position;
+          no error games; no duplicate games
+
+    Yields:
+      tuple (
+          pawnzobrist.Zobrist,                                # position
+          list[tuple[int, str]],                              # cumulative movement list to position; depth is len()
+          Optional[ECOEntry],                                 # ECO entry for position, if any
+          chess.Board,                                        # current position board
+          list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]],  # moves leaving position [(ply, move, position), ...]
+          PositionFlag,                                       # flags
+          set[ExtraInsightPositionFlag],                      # {extra1, extra2, ...}
+          Optional[PositionEval],                             # eval | None
+          dict[str, Optional[dict[str, str]]]], None, None]:  # {game: headers} for non-error non-duplicates
+      )
+    """
+    # if position is not given, we start from the top
+    plys = [] if plys is None else plys
+    if position is None:
+      position = pawnzobrist.STARTING_POSITION_HASH
+      board = chess.Board(STANDARD_CHESS_FEN)
+    if board is None:
+      raise ValueError('If you provide a start position, you must provide a board too')
+    # get position
+    position_info: Optional[tuple[
+        PositionFlag, set[ExtraInsightPositionFlag],
+        Optional[PositionEval], set[str]]] = self.GetPosition(position)
+    if not position_info:
+      raise ValueError(f'Unknown position {str(position)!r}')
+    # get games in this position, if we were asked to do this
+    games: dict[str, Optional[dict[str, str]]] = {
+        h: None for h in position_info[3] if self.IsGameHash(h)}
+    if games and expand_games:
+      for game_hash in sorted(games.keys()):
+        game_info: Optional[tuple[
+            pawnzobrist.Zobrist, list[int], dict[str, str],
+            ErrorGameCategory, Optional[str], Optional[str]]] = self.GetGame(game_hash)
+        if not game_info:
+          raise RuntimeError(f'Unknown position {str(position)!r}')
+        games[game_hash] = game_info[2]
+    # get moves for this position
+    moves: list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]] = [
+        (p, board.san(m), m, h) for p, m, h in self.GetChildMoves(position)]
+    moves.sort(key=lambda m: m[1])
+    # package the position
+    yield (position, plys, self._eco.Get(position), board.copy(), moves) + position_info[:3] + (games,)
+    # if we want to recurse, do it here
+    if recurse:
+      for ply, san, move, move_z in moves:
+        child_board: Optional[chess.Board] = board.copy()
+        child_board.push(move)
+        yield from self.Walk(
+            position=move_z, plys=plys + [(ply, san)], board=child_board,
+            recurse=True, expand_games=expand_games)
 
   ##################################################################################################
 
+  def IsGameHash(self, game_hash: str) -> bool:
+    """Checks if a `game_hash` was in the regular DB at the beginning of a run."""
+    # lazy load of cache
+    if self._game_hashes is None:
+      self._game_hashes = self.GetAllGameHashes()
+      logging.info('Loaded %d games already parsed into DB...', len(self._game_hashes))
+    # lookup
+    return game_hash in self._game_hashes
+
+  def IsDuplicateGameHash(self, game_hash: str) -> bool:
+    """Checks if a `game_hash` was in the duplicates DB at the beginning of a run."""
+    # lazy load of cache
+    if self._duplicate_hashes is None:
+      self._duplicate_hashes = self.GetAllDuplicateHashes()
+      logging.info('Loaded %d games already parsed into DB...', len(self._duplicate_hashes))
+    # lookup
+    return game_hash in self._duplicate_hashes
+
   def IsHashInDB(self, game_hash: str) -> bool:
     """Checks if a `game_hash` was in the DB at the beginning of a run."""
-    # lazy load of cache
-    if self._known_hashes is None:
-      self._known_hashes = self.GetAllKnownHashes()
-      logging.info('Loaded %d games already parsed into DB...', len(self._known_hashes))
-    # lookup
-    return game_hash in self._known_hashes
+    return self.IsGameHash(game_hash) or self.IsDuplicateGameHash(game_hash)
 
   def GetPositionsWithMultipleBranches(
       self, filter_engine_done: bool = False) -> dict[int, dict[str, dict[int, str]]]:
@@ -1285,44 +1429,57 @@ class PGNData:
       result.setdefault(branch_count, {})[f_h] = plys
     return result
 
-  def PositionHashToFEN(
-      self, position_zob: pawnzobrist.Zobrist) -> tuple[str, chess.Board, list[int]]:
-    """Reconstruct a FEN string for the given `position_hash`. Returns None if no path to root."""
+  def Locate(self, start_position: pawnzobrist.Zobrist) -> tuple[
+      chess.Board, list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]]]:
+    """Locate move in tree by finding path to root.
+
+    Args:
+      start_position: The hash you want to locate
+
+    Returns:
+      (board, [(ply, san, move, hash), (), ...])
+    """
     # if this is already the starting position, return the standard FEN directly
-    start_hash = str(pawnzobrist.STARTING_POSITION_HASH)
     board = chess.Board(STANDARD_CHESS_FEN)
-    position_hash = str(position_zob)
-    if position_hash == start_hash:
-      return (STANDARD_CHESS_FEN, board, [])
-    # trace backwards through `moves` until we reach STARTING_POSITION_HASH
-    reverse_moves: list[int] = []  # moves in backward order from the target up to the start
-    current_hash: str = position_hash
-    visited: set[str] = set()
-    while current_hash != start_hash:
-      if current_hash in visited:
-        raise RuntimeError(f'Detected cycle or repeated position: {position_hash}/{current_hash}')
-      visited.add(current_hash)
-      # find a row in `moves` where `to_position_hash == current_hash`
-      row: Optional[tuple[str, int]] = self._conn.execute(
-          'SELECT from_position_hash, ply FROM moves WHERE to_position_hash = ? LIMIT 1',
-          (current_hash,)).fetchone()
-      if not row:
-        raise RuntimeError(f'No parent found: {position_hash}/{current_hash}')
-      from_hash, ply_int = row
-      reverse_moves.append(ply_int)
-      current_hash = from_hash
-    # apply those moves forward from a fresh board
-    actual_moves: list[int] = reverse_moves[::-1]
-    for ply_int in actual_moves:
-      move: chess.Move = DecodePly(ply_int)
+    if start_position == pawnzobrist.STARTING_POSITION_HASH:
+      return (board, [])
+    # iterate up the tree to find ROOT, save the path
+    position_pointer: pawnzobrist.Zobrist = start_position
+    path_to_root: list[tuple[int, chess.Move, pawnzobrist.Zobrist]] = []
+    visited: set[pawnzobrist.Zobrist] = set()
+    while position_pointer != pawnzobrist.STARTING_POSITION_HASH:
+      if position_pointer in visited:
+        raise ValueError(
+            f'Cycle detected on path to ROOT @{str(position_pointer)}, '
+            f'from {str(start_position)}; should not happen in this DB')
+      visited.add(position_pointer)
+      parents: list[
+          tuple[int, chess.Move, pawnzobrist.Zobrist]] = self.GetParentMoves(position_pointer)
+      if not parents:
+        raise ValueError(
+            f'No path to ROOT @{str(position_pointer)}, '
+            f'from {str(start_position)}; should not happen in this DB')
+      if len(parents) > 1:
+        logging.info(
+            'More than one path to ROOT: @%s, from %s: %r',
+            position_pointer, start_position, parents)
+      path_to_root.append(parents[0])
+      position_pointer = parents[0][2]
+    # apply those moves forward from a fresh board, get the SAN on the way
+    path_to_root = path_to_root[::-1]
+    path_with_san: list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]] = []
+    for ply, move, move_hash in path_to_root:
       if not board.is_legal(move):
-        raise RuntimeError(f'Illegal move reconstructing {position_hash}: {move}, {board.fen()}')
+        raise RuntimeError(
+            f'Illegal move reconstructing {str(start_position)}: {move}, {board.fen()}')
+      path_with_san.append((ply, board.san(move), move, move_hash))
       board.push(move)
-    # the resulting board should match the `position_hash`, so check!
+    # the resulting board should match the `start_position`, so check!
     board_hash: pawnzobrist.Zobrist = pawnzobrist.ZobristFromBoard(board)
-    if position_hash != str(board_hash):
-      raise RuntimeError(f'Position mismatch {position_hash}: {str(board_hash)}, {board.fen()}')
-    return (board.fen(), board, actual_moves)
+    if start_position != board_hash:
+      raise RuntimeError(
+          f'Position mismatch {str(start_position)}: {str(board_hash)}, {board.fen()}')
+    return (board, path_with_san)
 
   def LoadGame(self, original_pgn: str, game: chess.pgn.Game) -> tuple[str, int, int]:
     """Loads game into database. Returns (game_hash, plys, new_positions)."""
@@ -1474,7 +1631,9 @@ class PGNData:
             self._InsertDuplicateGame(dgh, top_primary, d_game[2])
             merges_done.append((dgh, top_primary, d_game[2]))
             known_duplicates.add(dgh)
-    # end
+    # end, remember to invalidate game hash hashes
+    self._game_hashes = None
+    self._duplicate_hashes = None
     return merges_done
 
   def CachedLoadFromURL(self, url: str, cache: Optional[PGNCache]) -> Generator[
@@ -1618,6 +1777,29 @@ class PGNData:
              f'{leaf_with_no_games!r}')
     yield ''
 
+  def PrintMovesDB(
+      self, start_position: Optional[pawnzobrist.Zobrist] = None,
+      recurse: bool = True, expand_games: bool = True) -> Generator[tuple[int, str], None, None]:
+    """Print moves DB from top to bottom, including valid games. Yields (game_count, line)."""
+    # if necessary, find parent
+    board: Optional[chess.Board] = None
+    plys: list[tuple[int, str]] = []
+    if start_position is not None:
+      board, path_to_root = self.Locate(start_position)
+      plys = [(e, s) for e, s, _, _ in path_to_root]
+    # walk and pretty-print
+    show_moves = lambda mv: ','.join(s[1] for s in mv) if mv else '*'  # type:ignore
+    for i, (pos, plys, eco, board, moves, flags, extras, engine, headers) in enumerate(self.Walk(
+        position=start_position, plys=plys, board=board,
+        recurse=recurse, expand_games=expand_games)):
+      eco_str: str = '' if eco is None else f' ({eco.code}/{eco.name})'
+      extras_str: str = ','.join(str(y)[25:] for y in {x for x in extras if x.value})
+      yield (i, f'{str(pos)}: {show_moves(plys)}{eco_str} → {show_moves(moves)} '
+                f'{str(flags)[13:]} [{extras_str}] {PrintEval(engine, board=board)}')
+      if expand_games:
+        for game in sorted(headers.keys()):
+          yield (i, f'    {game}: {headers[game]!r}')
+
 
 class ECO:
   """ECO (Encyclopedia of Chess Openings) in-memory database."""
@@ -1652,3 +1834,4 @@ class ECO:
             san=san, ply=ply, position=pawnzobrist.ZobristFromHash(mv), flags=PositionFlag(flags)))
       self._db[position] = ECOEntry(
           code=eco.upper().strip(), name=name.strip(), pgn=pgn.strip(), moves=eco_moves)
+    logging.info('Loaded %d ECO openings...', len(self._db))
