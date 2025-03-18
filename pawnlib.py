@@ -221,6 +221,21 @@ class PositionEval(TypedDict):
   # AVOID adding stuff here; if you do, change EncodeEval() & DecodeEval() and MIGRATE THE DB!!
 
 
+class PositionStats(TypedDict):
+  """Stats for one position and all its children."""
+  # position info
+  pos: pawnzobrist.Zobrist
+  plys: list[tuple[int, str]]
+  eco: Optional[ECOEntry]
+  board: chess.Board
+  moves: list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]]
+  flags: PositionFlag
+  extras: set[ExtraInsightPositionFlag]
+  engine: Optional[PositionEval]
+  # stats
+  n_games: int
+
+
 # convert a PositionEval into a string of 4 ','-separated hex ints
 EncodeEval: Callable[[PositionEval], str] = lambda e: ','.join(
     f'{e[k]:x}' for k in ('depth', 'best', 'mate', 'score'))
@@ -263,6 +278,21 @@ def DecodePly(ply: int) -> chess.Move:
   if not 0 <= from_square < 64 or not 0 <= ply < 64:
     raise ValueError(f'Invalid coordinates: {from_square} / {ply}')
   return chess.Move(from_square, ply, promotion=promotion)
+
+
+PrettyMoves = lambda mv: ','.join(s[1] for s in mv) if mv else '*'  # type:ignore
+PrettyECO: Callable[[Optional[ECOEntry]], str] = lambda e: '' if e is None else f' ({e.code}/{e.name})'
+PrettyExtras: Callable[[set[ExtraInsightPositionFlag]], str] = lambda e: ','.join(str(y)[25:] for y in {x for x in e if x.value})
+
+
+def PrettyPositionLine(
+    pos: pawnzobrist.Zobrist, plys: list[tuple[int, str]], eco: Optional[ECOEntry],
+    board: chess.Board, moves: list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]],
+    flags: PositionFlag, extras: set[ExtraInsightPositionFlag],
+    engine: Optional[PositionEval]) -> str:
+  """Pretty-print one position."""
+  return (f'{str(pos)}: {PrettyMoves(plys)}{PrettyECO(eco)} {str(flags)[13:]} '
+          f'[{PrettyExtras(extras)}] {PrintEval(engine, board=board)} → {PrettyMoves(moves)}')
 
 
 def CountFileLines(file_path: str) -> int:
@@ -1006,7 +1036,16 @@ class PGNData:
     self.DropAllTables()
     self.DeleteDBFile()
 
+  def _CountEntries(self, table_name: str) -> int:
+    """Returns the total number of entries in the `table_name` table."""
+    row: Optional[tuple[int]] = self._conn.execute(f'SELECT COUNT(*) FROM {table_name};').fetchone()
+    return 0 if row is None else row[0]
+
   # POSITIONS TABLE ################################################################################
+
+  def PositionsCount(self) -> int:
+    """Returns the total number of entries in the `positions` table."""
+    return self._CountEntries('positions')
 
   def _InsertPosition(
       self, position_hash: pawnzobrist.Zobrist, flags: PositionFlag,
@@ -1104,6 +1143,10 @@ class PGNData:
 
   # GAMES TABLE ####################################################################################
 
+  def GamesCount(self) -> int:
+    """Returns the total number of entries in the `games` table."""
+    return self._CountEntries('games')
+
   def _InsertParsedGame(
       self, game_hash: str, end_position_hash: pawnzobrist.Zobrist, game_plys: list[int],
       game_headers: dict[str, str]) -> None:
@@ -1186,6 +1229,10 @@ class PGNData:
 
   # DUPLICATE_GAMES TABLE ##########################################################################
 
+  def DuplicateGamesCount(self) -> int:
+    """Returns the total number of entries in the `duplicate_games` table."""
+    return self._CountEntries('duplicate_games')
+
   def _InsertDuplicateGame(
       self, game_hash: str, duplicate_of: str, game_headers: dict[str, str]) -> None:
     """Insert a "duplicate" game in `game_hash` pointing to `duplicate_of` hash. Removes original.
@@ -1259,6 +1306,10 @@ class PGNData:
 
   # MOVES TABLE ####################################################################################
 
+  def MovesCount(self) -> int:
+    """Returns the total number of entries in the `moves` table."""
+    return self._CountEntries('moves')
+
   def _InsertMove(
       self, from_hash: pawnzobrist.Zobrist, ply: int, to_hash: pawnzobrist.Zobrist) -> None:
     """Insert an edge from `from_hash` with move `ply` leading to `to_hash`."""
@@ -1292,8 +1343,20 @@ class PGNData:
       position: Optional[pawnzobrist.Zobrist] = None,
       plys: Optional[list[tuple[int, str]]] = None,
       board: Optional[chess.Board] = None,
+      seen_positions: Optional[set[str]] = None,
       recurse: bool = True,
-      expand_games: bool = True) -> Generator[tuple[
+      expand_games: bool = True,
+      node_finished_call: Optional[Callable[[tuple[
+          pawnzobrist.Zobrist,
+          list[tuple[int, str]],
+          Optional[ECOEntry],
+          chess.Board,
+          list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]],
+          PositionFlag,
+          set[ExtraInsightPositionFlag],
+          Optional[PositionEval],
+          dict[str, Optional[dict[str, str]]]
+      ]], None]] = None) -> Generator[tuple[
           pawnzobrist.Zobrist,                                # position
           list[tuple[int, str]],                              # cumulative movement list to position; depth is len()
           Optional[ECOEntry],                                 # ECO entry for position, if any
@@ -1308,9 +1371,13 @@ class PGNData:
     Args:
       position: (default None) Initial position
       plys: (default None) Plys from root to this position
+      board: (default None) Board for position
+      seen_positions: (default: None) set of visited positions
       recurse: (default True) Follow ply paths and recurse into games tree
       expand_games: (default True) If True will get game headers info for each position;
           no error games; no duplicate games
+      node_finished_call: (default None) call(tuple[same-as-yield])-> None that will be called after
+          all work is done for node, i.e., children have all been iterated
 
     Yields:
       tuple (
@@ -1327,12 +1394,16 @@ class PGNData:
     """
     # if position is not given, we start from the top
     plys = [] if plys is None else plys
+    seen_positions = set() if seen_positions is None else seen_positions
     if position is None:
       position = pawnzobrist.STARTING_POSITION_HASH
       board = chess.Board(STANDARD_CHESS_FEN)
     if board is None:
       raise ValueError('If you provide a start position, you must provide a board too')
     # get position
+    if str(position) in seen_positions:
+      logging.error('Should not have hit a duplicate: %s', position)
+      return
     position_info: Optional[tuple[
         PositionFlag, set[ExtraInsightPositionFlag],
         Optional[PositionEval], set[str]]] = self.GetPosition(position)
@@ -1354,15 +1425,24 @@ class PGNData:
         (p, board.san(m), m, h) for p, m, h in self.GetChildMoves(position)]
     moves.sort(key=lambda m: m[1])
     # package the position
-    yield (position, plys, self._eco.Get(position), board.copy(), moves) + position_info[:3] + (games,)
+    seen_positions.add(str(position))
+    position_yield = (
+        position, plys, self._eco.Get(position), board.copy(), moves) + position_info[:3] + (games,)
+    yield position_yield
     # if we want to recurse, do it here
     if recurse:
       for ply, san, move, move_z in moves:
+        if str(move_z) in seen_positions:
+          continue
         child_board: Optional[chess.Board] = board.copy()
         child_board.push(move)
         yield from self.Walk(
             position=move_z, plys=plys + [(ply, san)], board=child_board,
-            recurse=True, expand_games=expand_games)
+            seen_positions=seen_positions, recurse=True, expand_games=expand_games,
+            node_finished_call=node_finished_call)
+    # we are about to finish this position
+    if node_finished_call is not None:
+      node_finished_call(position_yield)
 
   ##################################################################################################
 
@@ -1789,17 +1869,63 @@ class PGNData:
       board, path_to_root = self.Locate(start_position)
       plys = [(e, s) for e, s, _, _ in path_to_root]
     # walk and pretty-print
-    show_moves = lambda mv: ','.join(s[1] for s in mv) if mv else '*'  # type:ignore
     for i, (pos, plys, eco, board, moves, flags, extras, engine, headers) in enumerate(self.Walk(
         position=start_position, plys=plys, board=board,
         recurse=recurse, expand_games=expand_games)):
-      eco_str: str = '' if eco is None else f' ({eco.code}/{eco.name})'
-      extras_str: str = ','.join(str(y)[25:] for y in {x for x in extras if x.value})
-      yield (i, f'{str(pos)}: {show_moves(plys)}{eco_str} → {show_moves(moves)} '
-                f'{str(flags)[13:]} [{extras_str}] {PrintEval(engine, board=board)}')
+      yield (i, PrettyPositionLine(pos, plys, eco, board, moves, flags, extras, engine))
       if expand_games:
         for game in sorted(headers.keys()):
           yield (i, f'    {game}: {headers[game]!r}')
+
+  def CollectGameStats(
+      self,
+      start_position: Optional[pawnzobrist.Zobrist] = None) -> Generator[PositionStats, None, None]:
+    """Do statistical analysis for DB."""
+    # if necessary, find parent
+    board: Optional[chess.Board] = None
+    plys: list[tuple[int, str]] = []
+    if start_position is not None:
+      board, path_to_root = self.Locate(start_position)
+      plys = [(e, s) for e, s, _, _ in path_to_root]
+    # create objects so we can define callback
+    position_count: int = self.PositionsCount()
+    position_stats: dict[pawnzobrist.Zobrist, PositionStats] = {}
+    finished_stats: dict[pawnzobrist.Zobrist, PositionStats] = {}
+
+    def _FinishPosition(position_info: tuple[
+        pawnzobrist.Zobrist,
+        list[tuple[int, str]],
+        Optional[ECOEntry],
+        chess.Board,
+        list[tuple[int, str, chess.Move, pawnzobrist.Zobrist]],
+        PositionFlag,
+        set[ExtraInsightPositionFlag],
+        Optional[PositionEval],
+        dict[str, Optional[dict[str, str]]]]) -> None:
+      position_z: pawnzobrist.Zobrist = position_info[0]
+      stats: PositionStats = position_stats.pop(position_z)
+      finished_stats[position_z] = stats
+
+    # walk the positions
+    for i, (pos, plys, eco, board, moves, flags, extras, engine, headers) in tqdm.tqdm(  # ignore:type
+        enumerate(self.Walk(
+            position=start_position, plys=plys, board=board,
+            recurse=True, expand_games=False, node_finished_call=_FinishPosition)),
+        total=position_count, mininterval=1.0, miniters=100, unit='pos',
+        smoothing=0.5, colour='green'):
+      # pop/yield and stats that are finished
+      while finished_stats:
+        yield finished_stats.popitem()[1]
+      n_games: int = len(headers)   # ignore:type
+      if n_games:
+        for p, d in position_stats.items():
+          d['n_games'] = d['n_games'] + n_games
+      position_stats[pos] = PositionStats(
+          pos=pos, plys=plys, eco=eco, board=board, moves=moves, flags=flags, extras=extras,  # ignore:type
+          engine=engine, n_games=n_games)                                                     # ignore:type
+    # finished, pop/yield any remaining stats
+    while finished_stats:
+      yield finished_stats.popitem()[1]
 
 
 class ECO:
